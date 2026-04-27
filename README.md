@@ -8,13 +8,15 @@ WisprFlow and other dictation tools listen continuously and ship audio off-devic
 
 ## Install
 
+One line:
+
 ```bash
-git clone git@github.com:djmunro/hush.git
-cd hush
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/djmunro/hush/main/install.sh | bash
 ```
 
-The installer creates a Python venv, downloads dependencies, registers a `launchd` agent so hush auto-starts at login, and prints the paths for two macOS permissions you'll need to grant manually.
+The installer clones the repo to `~/.local/share/hush`, creates a Python venv, downloads dependencies, registers a `launchd` agent so hush auto-starts at login, opens the two System Settings panes you need, and prints the binary path to add.
+
+Prereqs that get auto-installed if missing: Xcode Command Line Tools (for git), Homebrew (you'll need to install this manually if absent), Python 3.13.
 
 ## Permissions
 

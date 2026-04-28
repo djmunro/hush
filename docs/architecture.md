@@ -15,9 +15,20 @@ src/
 │                 the screen. Three modes (Hidden / Recording /
 │                 Transcribing) driven by shared OverlayState. Custom
 │                 NSView subclass with drawRect: for the bars and dots.
-├── audio.rs      cpal capture, RMS computation, whisper.cpp invocation.
-│                 Runs entirely on a worker thread because the cpal
-│                 stream is !Send.
+├── audio.rs      One-shot whisper-model bootstrap (cache_dir, ensure_model).
+│                 The capture/transcribe/output pipeline lives in dictation/.
+├── dictation/    Hexagonal dictation pipeline. pipeline.rs is the pure-sync
+│   │             state machine + four port traits (Capture / Transcriber /
+│   │             Output / StatusSink); the rest are production adapters.
+│   ├── pipeline.rs       Pipeline<C,T,O,S>::handle(Trigger) state machine
+│   │                     + boundary tests with in-memory fakes.
+│   ├── cpal_capture.rs   CpalCapture — owns its own thread; the !Send
+│   │                     cpal::Stream stays inside it. mpsc commands cross.
+│   ├── whisper.rs        WhisperTranscriber wrapping WhisperContext.
+│   ├── output.rs         ClipboardPasteOutput → keyboard::paste.
+│   ├── overlay_sink.rs   OverlayStatusSink — mutates OverlayState and
+│   │                     plays Tink / Pop on Recording / Idle.
+│   └── mod.rs            Dictation facade (production / start_processing).
 ├── keyboard.rs   Native Cmd+V via CGEventPost. Replaces the original
 │                 osascript shellout. Critical for correct TCC attribution
 │                 — see docs/macos-permissions.md.
@@ -36,7 +47,7 @@ src/
                 │                                           │
                 │   NSApplication run loop                  │
                 │   ├── NSEvent global monitor (.flagsChanged)
-                │   │     block sends Msg::Start/Stop       │
+                │   │     block sends Trigger::Start/Stop       │
                 │   │     ↓ (mpsc channel)                  │
                 │   ├── NSTimer 1.5s — TCC poll             │
                 │   ├── NSTimer 30Hz — overlay redraw       │
@@ -45,13 +56,14 @@ src/
                                     │ mpsc
                                     ↓
                 ┌───────────────────────────────────────────┐
-                │           AUDIO WORKER THREAD             │
+                │      DICTATION WORKER THREAD              │
                 │                                           │
-                │   cpal stream (!Send — must be born here) │
-                │   audio callback computes RMS,            │
-                │     pushes into OverlayState              │
-                │   On Msg::Stop: drain buffer, run whisper,│
-                │     paste via CGEventPost                 │
+                │   Pipeline::run drives handle(Trigger).   │
+                │   CpalCapture spawns a sub-thread that    │
+                │     owns the !Send cpal::Stream; callback │
+                │     emits LevelTick into StatusSink.      │
+                │   On Trigger::Stop: drain buffer, run     │
+                │     whisper, paste via CGEventPost.       │
                 └────────────────────────────────────────────┘
 ```
 
@@ -60,7 +72,7 @@ whatever thread first creates it. We put it on the worker so the main
 thread (NSApp) is never blocked by the ~6 second whisper inference.
 
 The NSEvent global monitor's block is the only piece that lives on main
-but talks to the worker — it sends `Msg::Start` / `Msg::Stop` on an mpsc
+but talks to the worker — it sends `Trigger::Start` / `Trigger::Stop` on an mpsc
 channel. The block fires on the main thread (so a `Cell<bool>` for
 edge-detection is fine — no `Mutex` needed).
 
@@ -82,7 +94,7 @@ Mutex contention is uncontested in practice: audio writes ~50Hz, UI reads
 `NSEvent.addGlobalMonitorForEventsMatchingMask` block matching
 `NSEventMask::FlagsChanged`. The block runs on the main thread, edge-
 detects on `event.modifierFlags().contains(.Function)`, and sends
-`Msg::Start` / `Msg::Stop` over the worker channel.
+`Trigger::Start` / `Trigger::Stop` over the worker channel.
 
 Why not `CGEventTap`? Because `CGEventTap` requires the **separate Input
 Monitoring TCC permission** AND has a brutal failure mode where

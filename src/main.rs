@@ -26,16 +26,6 @@ const FN_FLAG_BITS: u64 = 0x00800000; // kCGEventFlagMaskSecondaryFn
 fn main() {
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
 
-    // Trigger TCC registration for Input Monitoring at startup. Without
-    // this call macOS won't add hush to the Input Monitoring list until
-    // the binary actually attempts an event tap install — which we do
-    // below — but a CGRequestListenEventAccess call is more reliable
-    // for forcing the entry to appear so the user has something to
-    // toggle in System Settings.
-    if !PermStatus::check().input_monitoring {
-        perms::request_input_monitoring();
-    }
-
     let overlay_state = overlay::OverlayState::new();
     // Overlay controller must be created on the main thread; it owns
     // its own NSTimer that drives show/hide + redraws.

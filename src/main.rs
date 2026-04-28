@@ -2,20 +2,17 @@
 
 mod audio;
 mod autostart;
+mod config;
 mod dictation;
 mod icon;
 mod keyboard;
 mod overlay;
 mod perms;
+mod shortcut;
 mod ui;
 
-use std::cell::Cell;
-use std::ptr::NonNull;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc;
 
-use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
 use objc2_foundation::MainThreadMarker;
 
 use dictation::{Dictation, Trigger};
@@ -23,49 +20,22 @@ use dictation::{Dictation, Trigger};
 fn main() {
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
 
+    let cfg = config::load();
+
     let overlay_state = overlay::OverlayState::new();
     let _overlay_ctrl = overlay::OverlayController::install(mtm, overlay_state.clone());
 
     let (tx, rx) = mpsc::channel::<Trigger>();
     Dictation::production(audio::ensure_model(), overlay_state.clone()).start_processing(rx);
 
-    // Install the global fn-key monitor. NSEvent.addGlobalMonitor needs
-    // only Accessibility (no separate Input Monitoring perm — this is
-    // the same approach Wispr Flow uses). The monitor is registered
-    // here and silently no-ops until Accessibility is granted; after
-    // that, events flow without any reinstall.
-    let monitor = install_fn_monitor(tx);
-    if let Some(m) = monitor {
-        // The OS retains the monitor; leak our handle so the block
-        // never drops while the app is alive.
-        std::mem::forget(m);
-    }
+    // Install the global shortcut monitor. NSEvent.addGlobalMonitor needs
+    // only Accessibility (no separate Input Monitoring perm). It silently
+    // no-ops until Accessibility is granted; after that, events flow
+    // without any reinstall.
+    let monitor = shortcut::ShortcutMonitor::install(cfg.shortcut.clone(), tx);
 
-    let ui_handles = ui::install_menubar_and_window(mtm);
+    let ui_handles = ui::install_menubar_and_window(mtm, cfg.shortcut, monitor);
     ui::maybe_show_settings_at_launch(&ui_handles.controller);
 
     ui::run_app(mtm);
-}
-
-fn install_fn_monitor(tx: Sender<Trigger>) -> Option<Retained<AnyObject>> {
-    // Edge-detect fn press / release. Block fires on the main thread,
-    // so a Cell suffices for the prev-state.
-    let fn_down = Cell::new(false);
-    let handler = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
-        let event = unsafe { event_ptr.as_ref() };
-        let pressed = event
-            .modifierFlags()
-            .contains(NSEventModifierFlags::Function);
-        if pressed && !fn_down.get() {
-            fn_down.set(true);
-            let _ = tx.send(Trigger::Start);
-        } else if !pressed && fn_down.get() {
-            fn_down.set(false);
-            let _ = tx.send(Trigger::Stop);
-        }
-    });
-    NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-        NSEventMask::FlagsChanged,
-        &handler,
-    )
 }

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const DEFAULT_MODEL: &str = "small.en";
+const DEFAULT_MODEL: &str = "large-v3-turbo";
 const MODEL_URL_PREFIX: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-";
 
 pub fn cache_dir() -> PathBuf {

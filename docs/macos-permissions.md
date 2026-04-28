@@ -77,18 +77,50 @@ codesign.
 |---------|-----------|----------------|-------|
 | Microphone | `AVCaptureDevice::authorizationStatusForMediaType(AVMediaTypeAudio)` | `AVCaptureDevice::requestAccessForMediaType_completionHandler` | In-app popup, no System Settings detour |
 | Accessibility | `AXIsProcessTrusted` | `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true})` | Canonical register-and-prompt; `CGRequestPostEventAccess` can silently no-op |
-| Input Monitoring | `CGPreflightListenEventAccess` | `CGRequestListenEventAccess` *plus* attempt `CGEventTap::new` | Either alone sometimes no-ops |
 
 `CGRequestPostEventAccess` exists, but in practice it can register the
 binary in the TCC database without ever surfacing the entry in System
 Settings → Accessibility. `AXIsProcessTrustedWithOptions(prompt:true)` is
 the API that reliably adds the entry to the list.
 
-For Input Monitoring, calling `CGRequestListenEventAccess` from a button
-click sometimes no-ops without prompting. The reliable trigger is to
-actually attempt an event tap install via `CGEventTap::new` — which is what
-`src/main.rs::install_event_tap` does. We do both: call request *and*
-attempt the tap.
+## Input Monitoring: do not use it. NSEvent.addGlobalMonitor under Accessibility is enough.
+
+We originally used `CGEventTap` (with `CGEventTapOptions::ListenOnly`) to
+detect global fn-key press/release. That requires the separate **Input
+Monitoring** TCC permission (`kTCCServiceListenEvent`). It also has a
+brutal failure mode on ad-hoc-signed dev builds: `CGPreflightListenEventAccess`
+checks the bundle ID against the TCC database, but `CGEventTapCreate` does
+a live cdhash check against the kernel. When the two disagree (which they
+do every time `cargo build` produces a new cdhash), `CGEventTapCreate`
+silently re-fires the *"Keystroke Receiving"* TCC prompt every time it's
+called — a prompt loop the user can't escape from if you retry on a timer.
+
+The fix isn't a better retry policy. It's not using `CGEventTap` for this
+at all. Replace it with `NSEvent.addGlobalMonitorForEventsMatchingMask`
+matching `NSEventMask::FlagsChanged`. That API:
+
+1. Detects global modifier-key state changes (including fn) the same as
+   `CGEventTap`'s `FlagsChanged`.
+2. Is gated only on **Accessibility** — no separate Input Monitoring
+   prompt, no separate Settings entry, no separate cdhash check.
+3. Doesn't fire any TCC prompt itself. It silently no-ops without
+   permission and starts delivering events the moment Accessibility is
+   granted — no reinstall on grant needed.
+4. Is what Wispr Flow uses (per their MDM deployment profile, which lists
+   Accessibility + Microphone only — no `kTCCServiceListenEvent`).
+
+The receipt: Apple DTS engineer Quinn the Eskimo on the developer forums
+states explicitly that for global event monitoring, "the former [NSEvent
+global monitor] requires the **Accessibility privilege** whereas the
+latter [`CGEventTap`] requires the **Input Monitoring privilege**."
+([Apple Forums #707680](https://developer.apple.com/forums/thread/707680))
+
+Implementation: `src/main.rs::install_fn_monitor`. Block fires on the
+main thread, edge-detects on `event.modifierFlags().contains(.Function)`,
+sends `Msg::Start` / `Msg::Stop` over the worker channel.
+
+**Rule: never reintroduce `CGEventTap` for global key listening. Use
+`NSEvent.addGlobalMonitor` instead.**
 
 ## TCC has no notification API
 
@@ -148,12 +180,31 @@ entries in System Settings → Privacy & Security:
 ```bash
 tccutil reset Microphone     com.djmunro.hush
 tccutil reset Accessibility  com.djmunro.hush
-tccutil reset ListenEvent    com.djmunro.hush
+tccutil reset ListenEvent    com.djmunro.hush   # legacy from older builds
 ```
+
+Current builds only request Microphone + Accessibility, so any
+`com.djmunro.hush` entry under Input Monitoring is safe to remove — it's
+left over from when we used `CGEventTap`. The `uninstall.sh` script
+includes the `ListenEvent` reset for cleanup of those legacy grants.
 
 For entries that aren't keyed to `com.djmunro.hush` (the bare-binary
 leftovers, the python3.14 entry), you can't remove them with `tccutil` —
 delete them manually in System Settings with the `−` button.
+
+## Stale processes will gaslight you
+
+When iterating, *make sure no old `hush` process is running before you
+launch the new build*. An older process holds the OLD cdhash registered
+with TCC; if it's still alive when you grant the new bundle, the old
+process can re-fire prompts in the background and make it look like the
+new bundle is broken.
+
+`scripts/install-dev.sh` handles this with `pkill -9` against every
+plausible hush process name + path, then waits up to 3s for them to
+exit before swapping the bundle. If you launch by hand for some reason,
+do the same: `pkill -9 -f hush` and check `pgrep -f hush` is empty
+before re-opening.
 
 ## Notarization (future, not done)
 

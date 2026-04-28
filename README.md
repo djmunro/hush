@@ -4,6 +4,8 @@ Local push-to-talk dictation for macOS. Hold **fn**, talk, release — Whisper t
 
 Lives in your menubar. Floating pill near the bottom-center of the screen shows live audio levels while you speak and a transcribing animation while Whisper runs.
 
+Two macOS permissions: **Microphone** and **Accessibility**. No Input Monitoring (we use `NSEvent.addGlobalMonitor` for the fn key, which Accessibility already covers).
+
 ## Install
 
 ### Drag-and-drop (recommended)
@@ -24,13 +26,12 @@ Requires Xcode Command Line Tools (`cmake`, `swift`) and the Rust toolchain (aut
 
 ## Permissions
 
-The Settings window has a card for each. The first one prompts in-app; the other two open the relevant System Settings pane.
+Two cards in the Settings window. The first prompts in-app; the second opens System Settings.
 
-| Permission | How granted |
-|---|---|
-| **Microphone** | One-click in-app prompt |
-| **Input Monitoring** | Toggle Hush ON in System Settings (so we can detect the fn key globally) |
-| **Accessibility** | Toggle Hush ON in System Settings (so we can send Cmd+V to paste) |
+| Permission | How granted | Why |
+|---|---|---|
+| **Microphone** | One-click in-app prompt | Capture audio. |
+| **Accessibility** | Toggle Hush ON in System Settings | Detect the fn key globally (`NSEvent.addGlobalMonitor`) AND send Cmd+V to paste (`CGEventPost`) — one perm covers both. |
 
 Permission status updates within ~1.5s of granting — no need to relaunch.
 
@@ -72,7 +73,7 @@ See [`docs/architecture.md`](docs/architecture.md) for module map, threading mod
 
 ## Stack
 
-[whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [whisper-rs](https://github.com/tazz4843/whisper-rs) (Metal on Apple Silicon) · [cpal](https://github.com/RustAudio/cpal) for mic · AppKit via [objc2](https://github.com/madsmtm/objc2) · `CGEventTap` for fn key · `CGEventPost` for paste.
+[whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [whisper-rs](https://github.com/tazz4843/whisper-rs) (Metal on Apple Silicon) · [cpal](https://github.com/RustAudio/cpal) for mic · AppKit via [objc2](https://github.com/madsmtm/objc2) · `NSEvent.addGlobalMonitor` for the fn key · `CGEventPost` for paste.
 
 ## Uninstall
 

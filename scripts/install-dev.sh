@@ -33,17 +33,27 @@ DEST_APP="/Applications/${APP_NAME}.app"
 bash "$ROOT/scripts/build-app.sh"
 BUILT_APP="$ROOT/target/release/${APP_NAME}.app"
 
-# 2. Quit any running instance (Hush.app or bare binary).
+# 2. Quit ALL running instances (Hush.app, bare binary, any hush proc).
+#    Lingering processes from old builds keep the OLD cdhash registered
+#    with TCC and re-fire prompts behind the user's back.
 echo "→ stopping running hush instances"
 osascript -e 'tell application "Hush" to quit' 2>/dev/null || true
-pkill -f "Hush.app/Contents/MacOS/hush" 2>/dev/null || true
-pkill -x hush 2>/dev/null || true
-sleep 0.5
+pkill -9 -f "Hush.app/Contents/MacOS/hush" 2>/dev/null || true
+pkill -9 -f "/target/release/Hush.app/Contents/MacOS/hush" 2>/dev/null || true
+pkill -9 -f "/target/release/hush" 2>/dev/null || true
+pkill -9 -x hush 2>/dev/null || true
+# Wait until no hush processes remain (max ~3s).
+for _ in 1 2 3 4 5 6; do
+    if ! pgrep -f "[Hh]ush" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.5
+done
 
 # 3. Reset TCC for hush's bundle ID — clears any sticky Denied state
 #    from a previous (now-invalidated) cdhash.
 echo "→ resetting TCC entries for $BUNDLE_ID"
-for svc in Microphone Accessibility ListenEvent; do
+for svc in Microphone Accessibility; do
     tccutil reset "$svc" "$BUNDLE_ID" >/dev/null 2>&1 || true
 done
 
@@ -66,12 +76,15 @@ What happens now:
   - Hush.app appears in your menubar (top-right).
   - Settings window auto-opens because perms are reset.
   - Click "Allow microphone" → standard system prompt → Allow.
-  - Click "Open Input Monitoring…" → toggle Hush ON in System Settings.
   - Click "Open Accessibility…" → toggle Hush ON in System Settings.
+    (One Accessibility grant covers BOTH the global fn-key monitor
+    and the Cmd+V paste — no Input Monitoring needed.)
 
 Stale entries to clean up MANUALLY in System Settings (one-time):
-  Privacy & Security → Microphone / Input Monitoring / Accessibility
-    - "hush" with the generic exec icon (old bare-binary)
+  Privacy & Security → Input Monitoring
+    - Any old "hush" entries here are now obsolete; remove them.
+  Privacy & Security → Microphone / Accessibility
+    - "hush" with the generic exec icon (old bare-binary install)
     - "python3.14" (old osascript misattribution)
   Click each, hit the - button. The NEW Hush.app entry will show its
   proper icon when you grant from the in-app buttons.

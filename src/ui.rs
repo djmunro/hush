@@ -23,7 +23,6 @@ use objc2_foundation::{
 use crate::autostart;
 use crate::icon;
 use crate::perms::{self, MicState, PermStatus};
-use crate::TapHandle;
 
 const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 
@@ -33,16 +32,11 @@ pub struct ControllerIvars {
     settings_window: OnceCell<Retained<NSWindow>>,
     mic_status_label: OnceCell<Retained<NSTextField>>,
     mic_button: OnceCell<Retained<NSButton>>,
-    input_status_label: OnceCell<Retained<NSTextField>>,
-    input_button: OnceCell<Retained<NSButton>>,
-    input_waiting: Cell<bool>,
-    input_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     accessibility_status_label: OnceCell<Retained<NSTextField>>,
     accessibility_button: OnceCell<Retained<NSButton>>,
     accessibility_waiting: Cell<bool>,
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
-    tap_handle: OnceCell<TapHandle>,
 }
 
 define_class!(
@@ -76,31 +70,11 @@ define_class!(
             self.refresh_perm_labels();
         }
 
-        #[unsafe(method(grantInputMonitoring:))]
-        fn grant_input_monitoring(&self, _sender: Option<&AnyObject>) {
-            // Force-register the binary in TCC's Input Monitoring
-            // list so the user has something to toggle in Settings.
-            // We deliberately do NOT call try_install here: every
-            // CGEventTapCreate against an unauthorized cdhash
-            // re-fires the TCC prompt. The polling tick will install
-            // exactly once, after the perm flips to granted.
-            perms::request_input_monitoring();
-            perms::open_input_monitoring_pane();
-            self.start_input_wait();
-        }
-
         #[unsafe(method(grantAccessibility:))]
         fn grant_accessibility(&self, _sender: Option<&AnyObject>) {
             perms::request_accessibility();
             perms::open_accessibility_pane();
             self.start_accessibility_wait();
-        }
-
-        #[unsafe(method(inputWaitTimeout:))]
-        fn input_wait_timeout(&self, _timer: Option<&AnyObject>) {
-            self.ivars().input_waiting.set(false);
-            self.ivars().input_wait_timer.replace(None);
-            self.refresh_perm_labels();
         }
 
         #[unsafe(method(accessibilityWaitTimeout:))]
@@ -194,30 +168,12 @@ impl AppController {
         let status = PermStatus::check();
         let mic_granted = status.mic_granted();
 
-        // If a perm flipped to granted while we were in the
-        // "Waiting…" window, clear the wait so the UI reflects
-        // the grant immediately and the timeout doesn't fire
-        // a redundant refresh.
-        if status.input_monitoring && self.ivars().input_waiting.get() {
-            self.ivars().input_waiting.set(false);
-            if let Some(t) = self.ivars().input_wait_timer.replace(None) {
-                t.invalidate();
-            }
-        }
+        // If Accessibility flipped to granted during the wait
+        // window, clear the wait state so the UI updates immediately.
         if status.accessibility && self.ivars().accessibility_waiting.get() {
             self.ivars().accessibility_waiting.set(false);
             if let Some(t) = self.ivars().accessibility_wait_timer.replace(None) {
                 t.invalidate();
-            }
-        }
-
-        // Lazily install the event tap exactly once, the moment
-        // Input Monitoring becomes granted. TapHandle::try_install
-        // consumes its sender on attempt, so this is safe to call
-        // every refresh — subsequent calls are a no-op.
-        if status.input_monitoring {
-            if let Some(handle) = self.ivars().tap_handle.get() {
-                handle.try_install();
             }
         }
 
@@ -234,18 +190,6 @@ impl AppController {
                 };
                 button.setTitle(title);
                 button.setEnabled(!mic_granted);
-            }
-            if let Some(label) = self.ivars().input_status_label.get() {
-                label.setStringValue(&perm_status_text(status.input_monitoring));
-                label.setTextColor(Some(&perm_color(status.input_monitoring)));
-            }
-            if let Some(button) = self.ivars().input_button.get() {
-                self.apply_grant_button(
-                    button,
-                    status.input_monitoring,
-                    self.ivars().input_waiting.get(),
-                    ns_string!("Open Input Monitoring…"),
-                );
             }
             if let Some(label) = self.ivars().accessibility_status_label.get() {
                 label.setStringValue(&perm_status_text(status.accessibility));
@@ -278,24 +222,6 @@ impl AppController {
         };
         button.setTitle(title);
         button.setEnabled(!granted && !waiting);
-    }
-
-    fn start_input_wait(&self) {
-        self.ivars().input_waiting.set(true);
-        let timer = unsafe {
-            let target: &AnyObject = self;
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                10.0,
-                target,
-                sel!(inputWaitTimeout:),
-                None,
-                false,
-            )
-        };
-        if let Some(prev) = self.ivars().input_wait_timer.replace(Some(timer)) {
-            prev.invalidate();
-        }
-        self.refresh_perm_labels();
     }
 
     fn start_accessibility_wait(&self) {
@@ -343,9 +269,8 @@ pub struct UiHandles {
     pub controller: Retained<AppController>,
 }
 
-pub fn install_menubar_and_window(mtm: MainThreadMarker, tap_handle: TapHandle) -> UiHandles {
+pub fn install_menubar_and_window(mtm: MainThreadMarker) -> UiHandles {
     let controller = AppController::new(mtm);
-    let _ = controller.ivars().tap_handle.set(tap_handle);
 
     unsafe {
         let app = NSApplication::sharedApplication(mtm);
@@ -501,26 +426,13 @@ unsafe fn build_settings_window(
     );
     add_card(&stack, &mic_card);
 
-    // Input Monitoring — System Settings
-    let input_card = build_card(
-        mtm,
-        ns_string!("Input Monitoring"),
-        ns_string!("Lets hush detect when you press and release the fn key. macOS only grants this from System Settings."),
-        ns_string!("Open Input Monitoring…"),
-        sel!(grantInputMonitoring:),
-        controller,
-        |labels| {
-            let _ = controller.ivars().input_status_label.set(labels.status.clone());
-            let _ = controller.ivars().input_button.set(labels.button.clone());
-        },
-    );
-    add_card(&stack, &input_card);
-
-    // Accessibility — System Settings
+    // Accessibility — System Settings. Gates BOTH the global fn-key
+    // monitor (via NSEvent.addGlobalMonitor) and the Cmd+V paste
+    // (via CGEventPost). Single perm covers both, no Input Monitoring.
     let acc_card = build_card(
         mtm,
         ns_string!("Accessibility"),
-        ns_string!("Lets hush paste the transcript by sending Cmd+V to the focused app. Requires System Settings."),
+        ns_string!("Lets hush detect the fn key globally and paste the transcript by sending Cmd+V to the focused app."),
         ns_string!("Open Accessibility…"),
         sel!(grantAccessibility:),
         controller,

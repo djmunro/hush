@@ -1,10 +1,8 @@
 //! macOS permission probes + grant helpers.
 //!
-//! Two of the three perms (Input Monitoring, Accessibility) require a
-//! trip to System Settings — the OS-level prompts can't be re-shown
-//! reliably once dismissed once. Microphone, however, has a real
-//! requestAccess API that pops the standard system dialog right inside
-//! the app. We use that for a one-click grant.
+//! Two perms: Microphone (in-app prompt via AVFoundation) and
+//! Accessibility (System Settings — gates both NSEvent.addGlobalMonitor
+//! for fn-key detection AND CGEventPost for Cmd+V paste).
 
 use std::process::Command;
 
@@ -15,12 +13,6 @@ use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::string::{CFString, CFStringRef};
 use objc2::runtime::Bool;
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
-
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightListenEventAccess() -> bool;
-    fn CGRequestListenEventAccess() -> bool;
-}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -39,7 +31,6 @@ pub enum MicState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PermStatus {
     pub microphone: MicState,
-    pub input_monitoring: bool,
     pub accessibility: bool,
 }
 
@@ -56,7 +47,6 @@ impl PermStatus {
             };
             Self {
                 microphone: mic_state,
-                input_monitoring: CGPreflightListenEventAccess(),
                 accessibility: AXIsProcessTrusted(),
             }
         }
@@ -67,21 +57,14 @@ impl PermStatus {
     }
 
     pub fn all_granted(&self) -> bool {
-        self.mic_granted() && self.input_monitoring && self.accessibility
-    }
-}
-
-pub fn request_input_monitoring() {
-    unsafe {
-        CGRequestListenEventAccess();
+        self.mic_granted() && self.accessibility
     }
 }
 
 /// Triggers the canonical macOS Accessibility prompt and registers the
 /// running binary in the Accessibility list. This is the API that
 /// actually makes the app appear in System Settings → Privacy &
-/// Security → Accessibility — `CGRequestPostEventAccess` can silently
-/// no-op until the binary tries to post an event.
+/// Security → Accessibility.
 pub fn request_accessibility() {
     unsafe {
         let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
@@ -108,12 +91,6 @@ pub fn request_microphone(on_done: impl Fn(bool) + Send + Sync + 'static) {
         });
         AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &block);
     }
-}
-
-pub fn open_input_monitoring_pane() {
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
-        .status();
 }
 
 pub fn open_accessibility_pane() {

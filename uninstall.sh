@@ -24,6 +24,8 @@ rm -rf "/Applications/Hush.app"
 rm -rf "$HOME/Applications/Hush.app"
 
 # Reset TCC for our bundle ID so a future reinstall starts clean.
+# ListenEvent included to clean up any legacy Input Monitoring grants
+# from older builds (current builds don't request that perm).
 for svc in Microphone Accessibility ListenEvent; do
     tccutil reset "$svc" com.djmunro.hush >/dev/null 2>&1 || true
 done
@@ -36,8 +38,9 @@ Left alone:
   - ~/.local/share/hush (source clone, if you used the source install)
 
 Manual cleanup if you want a complete reset:
-  - System Settings → Privacy & Security → Microphone / Input Monitoring /
-    Accessibility — click any "hush" or "python3.14" entries and hit -
-    to remove them. (We can't always do this from a script — TCC
-    permissions for tccutil are per-installer.)
+  - System Settings → Privacy & Security → Microphone / Accessibility /
+    Input Monitoring — click any "hush" or "python3.14" entries and
+    hit - to remove them. (Current builds only use Microphone +
+    Accessibility; an Input Monitoring entry from an older build is
+    safe to delete.)
 EOF

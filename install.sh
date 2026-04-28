@@ -98,7 +98,7 @@ fi
 
 # Reset TCC for our bundle ID — clears any sticky Denied state from a
 # previous (now-invalidated) cdhash. Harmless on first install.
-for svc in Microphone Accessibility ListenEvent; do
+for svc in Microphone Accessibility; do
     tccutil reset "$svc" com.djmunro.hush >/dev/null 2>&1 || true
 done
 
@@ -116,16 +116,20 @@ What happens now:
   - Hush.app appears in your menubar (top-right).
   - Settings window auto-opens because perms are unset.
   - Click "Allow microphone" → standard system prompt → Allow.
-  - Click "Open Input Monitoring…" → toggle Hush ON in System Settings.
   - Click "Open Accessibility…" → toggle Hush ON in System Settings.
+    (One Accessibility grant covers BOTH the global fn-key monitor
+    and the Cmd+V paste — no separate Input Monitoring needed.)
   - The Settings window has an "Open at login" checkbox.
 
 Then hold the fn key anywhere on macOS, talk, release. Text appears at your cursor.
 
 Stale entries to clean up MANUALLY in System Settings →
-Privacy & Security → Microphone / Input Monitoring / Accessibility:
-  - "hush" with the generic green exec icon (old bare-binary install)
-  - "python3.14" (old osascript misattribution — fixed in current builds)
+Privacy & Security:
+  - Input Monitoring → any old "hush" entry here is now obsolete (we
+    no longer use this perm); remove it with the - button.
+  - Microphone / Accessibility → "hush" with the generic exec icon
+    (old bare-binary install) and "python3.14" (old osascript
+    misattribution — fixed in current builds).
 
 Click each and hit the - button. The new Hush.app will register fresh
 under its own bundle ID, com.djmunro.hush.

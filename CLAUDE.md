@@ -39,8 +39,15 @@ at your cursor. Rust + AppKit (objc2) + whisper.cpp (Metal) + cpal.
   - Accessibility → `AXIsProcessTrustedWithOptions(prompt:true)` —
     canonical "register + prompt", reliably adds the binary to the System
     Settings list.
-  - Input Monitoring → `CGRequestListenEventAccess` *plus* an actual
-    `CGEventTap::new` attempt; either alone sometimes no-ops.
+- **Never use `CGEventTap` for global key listening.** It requires the
+  separate Input Monitoring TCC perm (`kTCCServiceListenEvent`), and
+  `CGEventTapCreate` against an unauthorized cdhash silently re-fires
+  the "Keystroke Receiving" prompt — a prompt loop we spent hours
+  debugging. Use `NSEvent::addGlobalMonitorForEventsMatchingMask` with
+  `NSEventMask::FlagsChanged` instead — same fn-key detection, gated
+  only on Accessibility (which we already need for `CGEventPost`).
+  See `src/main.rs::install_fn_monitor` and
+  `docs/macos-permissions.md` for the full rationale.
 
 ## Code style
 
@@ -71,5 +78,12 @@ at your cursor. Rust + AppKit (objc2) + whisper.cpp (Metal) + cpal.
 - Don't reintroduce a `~/.local/bin/hush` symlink — the bare binary at a
   separate path creates a separate TCC identity, which is the bug we spent
   most of this project debugging.
-- Don't `git add Cargo.lock` (it's gitignored — single-binary bin crate).
+- Don't reintroduce the Input Monitoring TCC perm. Anything we'd do with
+  `CGEventTap` we can do with `NSEvent.addGlobalMonitor` under Accessibility.
+- **Do** `git add Cargo.lock` — bin crates check it in (Cargo's official
+  guidance for end products: reproducible builds across machines).
 - Don't `git add dist/` (gitignored).
+- Don't leave stale processes around. `install-dev.sh` `pkill -9`s every
+  `hush`-named process and waits up to 3s for them to exit before
+  swapping the bundle — old processes hold the OLD cdhash registered
+  with TCC and can re-fire prompts behind your back.

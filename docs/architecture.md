@@ -4,13 +4,12 @@
 
 ```
 src/
-├── main.rs       Entry point. Sets up NSApp, the global event tap on the
-│                 main run loop, and the audio worker thread. Owns
-│                 TapHandle so the tap can be installed lazily after the
-│                 user grants Input Monitoring.
+├── main.rs       Entry point. Sets up NSApp, installs the global fn-key
+│                 monitor (NSEvent.addGlobalMonitor for FlagsChanged),
+│                 spawns the audio worker thread.
 ├── ui.rs         AppController (NSObject subclass via objc2 define_class!),
 │                 NSStatusItem with template icon, NSMenu, settings
-│                 NSWindow with the three permission cards, NSTimer poll
+│                 NSWindow with the two permission cards, NSTimer poll
 │                 for TCC state changes.
 ├── overlay.rs    Floating pill panel (NSPanel) near the bottom-center of
 │                 the screen. Three modes (Hidden / Recording /
@@ -23,8 +22,9 @@ src/
 │                 osascript shellout. Critical for correct TCC attribution
 │                 — see docs/macos-permissions.md.
 ├── perms.rs      Permission probe + request helpers. Wraps AVCaptureDevice
-│                 (mic), AXIsProcessTrusted (accessibility),
-│                 CGRequestListenEventAccess (input monitoring).
+│                 (mic) and AXIsProcessTrusted/AXIsProcessTrustedWithOptions
+│                 (accessibility). No Input Monitoring.
+├── autostart.rs  Per-user LaunchAgent for "Open Hush at login" checkbox.
 └── icon.rs       Menubar template icon, drawn at runtime via NSBezierPath.
 ```
 
@@ -35,10 +35,10 @@ src/
                 │              MAIN THREAD                  │
                 │                                           │
                 │   NSApplication run loop                  │
-                │   ├── CGEventTap (FlagsChanged events)    │
-                │   │     callback sends Msg::Start/Stop    │
+                │   ├── NSEvent global monitor (.flagsChanged)
+                │   │     block sends Msg::Start/Stop       │
                 │   │     ↓ (mpsc channel)                  │
-                │   ├── NSTimer 1.5s — TCC poll, tap retry  │
+                │   ├── NSTimer 1.5s — TCC poll             │
                 │   ├── NSTimer 30Hz — overlay redraw       │
                 │   └── all NSView/NSWindow updates         │
                 └────────────────────────────────────────────┘
@@ -59,8 +59,10 @@ The cpal stream's `!Send` constraint forces the audio capture to live on
 whatever thread first creates it. We put it on the worker so the main
 thread (NSApp) is never blocked by the ~6 second whisper inference.
 
-The event tap callback is the only piece that lives on main but talks to
-the worker — it sends `Msg::Start` / `Msg::Stop` on an mpsc channel.
+The NSEvent global monitor's block is the only piece that lives on main
+but talks to the worker — it sends `Msg::Start` / `Msg::Stop` on an mpsc
+channel. The block fires on the main thread (so a `Cell<bool>` for
+edge-detection is fine — no `Mutex` needed).
 
 ## Shared state — `OverlayState`
 
@@ -74,25 +76,27 @@ the worker — it sends `Msg::Start` / `Msg::Stop` on an mpsc channel.
 Mutex contention is uncontested in practice: audio writes ~50Hz, UI reads
 30Hz, hold time is a few µs. Atomics would be premature optimization.
 
-## Run loop integration
+## Global fn-key monitor — NSEvent.addGlobalMonitor under Accessibility
 
-`CGEventTap` is created with `CGEventTap::new` and gets a Mach port. We
-add the tap's run loop source to `CFRunLoop::get_main()` and let
-`NSApplication::run` drive it. No separate dispatch queue, no GCD; AppKit
-and the event tap share the same thread.
+`src/main.rs::install_fn_monitor` registers an
+`NSEvent.addGlobalMonitorForEventsMatchingMask` block matching
+`NSEventMask::FlagsChanged`. The block runs on the main thread, edge-
+detects on `event.modifierFlags().contains(.Function)`, and sends
+`Msg::Start` / `Msg::Stop` over the worker channel.
 
-## TapHandle and lazy event-tap install
+Why not `CGEventTap`? Because `CGEventTap` requires the **separate Input
+Monitoring TCC permission** AND has a brutal failure mode where
+`CGEventTapCreate` re-fires the "Keystroke Receiving" prompt every time
+it's called against an unauthorized cdhash — and ad-hoc dev builds get
+a new cdhash on every `cargo build`. We spent hours trapped in a prompt
+loop before switching APIs. See `docs/macos-permissions.md` for the full
+write-up.
 
-If Input Monitoring isn't granted at startup, `CGEventTap::new` fails. We
-wrap the install in `TapHandle::try_install` which:
-
-1. Holds the mpsc Sender pending until the tap actually installs.
-2. Re-checks `PermStatus::check().input_monitoring` each time it's called.
-3. Installs the tap once and consumes the sender into the tap callback.
-
-The UI's 1.5s poll timer re-calls `try_install` every tick, so the moment
-the user grants Input Monitoring (in System Settings or our pane), the
-tap comes online without an app restart.
+`NSEvent.addGlobalMonitor` is gated only on Accessibility (which we
+already need for `CGEventPost`-based pasting), and it doesn't fire any
+TCC prompt itself — it silently no-ops without permission and starts
+delivering events immediately when Accessibility is granted, no
+reinstall on grant needed. This is the same approach Wispr Flow uses.
 
 ## objc2 patterns we use
 

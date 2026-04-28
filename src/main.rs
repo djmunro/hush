@@ -2,6 +2,7 @@
 
 mod audio;
 mod autostart;
+mod dictation;
 mod icon;
 mod keyboard;
 mod overlay;
@@ -17,18 +18,16 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
 use objc2_foundation::MainThreadMarker;
 
+use dictation::{Dictation, Trigger};
+
 fn main() {
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
 
     let overlay_state = overlay::OverlayState::new();
     let _overlay_ctrl = overlay::OverlayController::install(mtm, overlay_state.clone());
 
-    let (tx, rx) = mpsc::channel::<audio::Msg>();
-    let worker_overlay = overlay_state.clone();
-    std::thread::spawn(move || {
-        let model_path = audio::ensure_model();
-        audio::run_worker(&model_path, rx, worker_overlay);
-    });
+    let (tx, rx) = mpsc::channel::<Trigger>();
+    Dictation::production(audio::ensure_model(), overlay_state.clone()).start_processing(rx);
 
     // Install the global fn-key monitor. NSEvent.addGlobalMonitor needs
     // only Accessibility (no separate Input Monitoring perm — this is
@@ -48,7 +47,7 @@ fn main() {
     ui::run_app(mtm);
 }
 
-fn install_fn_monitor(tx: Sender<audio::Msg>) -> Option<Retained<AnyObject>> {
+fn install_fn_monitor(tx: Sender<Trigger>) -> Option<Retained<AnyObject>> {
     // Edge-detect fn press / release. Block fires on the main thread,
     // so a Cell suffices for the prev-state.
     let fn_down = Cell::new(false);
@@ -59,10 +58,10 @@ fn install_fn_monitor(tx: Sender<audio::Msg>) -> Option<Retained<AnyObject>> {
             .contains(NSEventModifierFlags::Function);
         if pressed && !fn_down.get() {
             fn_down.set(true);
-            let _ = tx.send(audio::Msg::Start);
+            let _ = tx.send(Trigger::Start);
         } else if !pressed && fn_down.get() {
             fn_down.set(false);
-            let _ = tx.send(audio::Msg::Stop);
+            let _ = tx.send(Trigger::Stop);
         }
     });
     NSEvent::addGlobalMonitorForEventsMatchingMask_handler(

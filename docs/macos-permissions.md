@@ -117,7 +117,7 @@ latter [`CGEventTap`] requires the **Input Monitoring privilege**."
 
 Implementation: `src/main.rs::install_fn_monitor`. Block fires on the
 main thread, edge-detects on `event.modifierFlags().contains(.Function)`,
-sends `Msg::Start` / `Msg::Stop` over the worker channel.
+sends `Trigger::Start` / `Trigger::Stop` over the worker channel.
 
 **Rule: never reintroduce `CGEventTap` for global key listening. Use
 `NSEvent.addGlobalMonitor` instead.**

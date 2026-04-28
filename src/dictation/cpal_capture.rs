@@ -1,7 +1,11 @@
 //! cpal capture isolated to its own thread. `cpal::Stream` is `!Send`, so
 //! it lives entirely inside the worker thread; the orchestrator drives
-//! capture through mpsc commands.
+//! capture through mpsc commands. The stream is built lazily on first
+//! `Start` and kept alive thereafter — subsequent `Start`/`Stop` just
+//! toggle an atomic flag, so the second-and-later dictations skip the
+//! 100–300ms cpal cold-start.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -56,46 +60,46 @@ impl Capture for CpalCapture {
     }
 }
 
-struct Active {
-    stream: cpal::Stream,
-    buf: Arc<Mutex<Vec<f32>>>,
+struct StreamState {
+    _stream: cpal::Stream,
     src_rate: u32,
+    recording: Arc<AtomicBool>,
+    buf: Arc<Mutex<Vec<f32>>>,
 }
 
 fn run(rx: mpsc::Receiver<Cmd>, level_cb: LevelCb) {
-    let mut active: Option<Active> = None;
+    let mut state: Option<StreamState> = None;
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Start { reply } => {
-                if active.is_some() {
-                    let _ = reply.send(Ok(()));
-                    continue;
-                }
-                match start_stream(level_cb.clone()) {
-                    Ok(a) => {
-                        active = Some(a);
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(e) => {
-                        let _ = reply.send(Err(e));
+                if state.is_none() {
+                    match start_stream(level_cb.clone()) {
+                        Ok(s) => state = Some(s),
+                        Err(e) => {
+                            let _ = reply.send(Err(e));
+                            continue;
+                        }
                     }
                 }
+                let s = state.as_ref().unwrap();
+                s.buf.lock().unwrap().clear();
+                s.recording.store(true, Ordering::Relaxed);
+                let _ = reply.send(Ok(()));
             }
             Cmd::Stop { reply } => {
-                if let Some(a) = active.take() {
-                    let _ = a.stream.pause();
-                    drop(a.stream);
-                    let mono = std::mem::take(&mut *a.buf.lock().unwrap());
-                    let _ = reply.send(Ok(resample_to_16k(&mono, a.src_rate)));
-                } else {
+                let Some(s) = state.as_ref() else {
                     let _ = reply.send(Ok(Vec::new()));
-                }
+                    continue;
+                };
+                s.recording.store(false, Ordering::Relaxed);
+                let mono = std::mem::take(&mut *s.buf.lock().unwrap());
+                let _ = reply.send(Ok(resample_to_16k(&mono, s.src_rate)));
             }
         }
     }
 }
 
-fn start_stream(level_cb: LevelCb) -> Result<Active, String> {
+fn start_stream(level_cb: LevelCb) -> Result<StreamState, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -108,6 +112,7 @@ fn start_stream(level_cb: LevelCb) -> Result<Active, String> {
     let src_rate = supported.sample_rate();
     let config: cpal::StreamConfig = supported.into();
 
+    let recording = Arc::new(AtomicBool::new(false));
     let buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let err_cb = |err| eprintln!("[hush] stream error: {err}");
 
@@ -115,9 +120,13 @@ fn start_stream(level_cb: LevelCb) -> Result<Active, String> {
         cpal::SampleFormat::F32 => {
             let buf = Arc::clone(&buf);
             let cb = Arc::clone(&level_cb);
+            let rec = Arc::clone(&recording);
             device.build_input_stream(
                 &config,
                 move |data: &[f32], _| {
+                    if !rec.load(Ordering::Relaxed) {
+                        return;
+                    }
                     append_mono(&buf, &cb, data, channels, |s| s);
                 },
                 err_cb,
@@ -127,9 +136,13 @@ fn start_stream(level_cb: LevelCb) -> Result<Active, String> {
         cpal::SampleFormat::I16 => {
             let buf = Arc::clone(&buf);
             let cb = Arc::clone(&level_cb);
+            let rec = Arc::clone(&recording);
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
+                    if !rec.load(Ordering::Relaxed) {
+                        return;
+                    }
                     append_mono(&buf, &cb, data, channels, |s| s as f32 / 32768.0);
                 },
                 err_cb,
@@ -139,9 +152,13 @@ fn start_stream(level_cb: LevelCb) -> Result<Active, String> {
         cpal::SampleFormat::U16 => {
             let buf = Arc::clone(&buf);
             let cb = Arc::clone(&level_cb);
+            let rec = Arc::clone(&recording);
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
+                    if !rec.load(Ordering::Relaxed) {
+                        return;
+                    }
                     append_mono(&buf, &cb, data, channels, |s| {
                         (s as f32 - 32768.0) / 32768.0
                     });
@@ -155,10 +172,11 @@ fn start_stream(level_cb: LevelCb) -> Result<Active, String> {
     .map_err(|e| e.to_string())?;
 
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Active {
-        stream,
-        buf,
+    Ok(StreamState {
+        _stream: stream,
         src_rate,
+        recording,
+        buf,
     })
 }
 

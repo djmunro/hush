@@ -4,8 +4,13 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use super::pipeline::Transcriber;
 
+const DEFAULT_PROMPT: &str = "Dictation with proper punctuation and capitalization. \
+Technical terms: TypeScript, JavaScript, Python, Rust, Go, GitHub, npm, API, JSON, \
+HTTP, SQL, GraphQL, AWS, Docker, Kubernetes, macOS, async, await.";
+
 pub struct WhisperTranscriber {
     ctx: WhisperContext,
+    prompt: String,
 }
 
 impl WhisperTranscriber {
@@ -15,7 +20,8 @@ impl WhisperTranscriber {
             .ok_or_else(|| "non-utf8 model path".to_string())?;
         let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
             .map_err(|e| format!("load whisper: {e}"))?;
-        Ok(Self { ctx })
+        let prompt = std::env::var("WHISPER_PROMPT").unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
+        Ok(Self { ctx, prompt })
     }
 }
 
@@ -25,9 +31,17 @@ impl Transcriber for WhisperTranscriber {
             .ctx
             .create_state()
             .map_err(|e| format!("state error: {e}"))?;
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: 1.0,
+        });
         params.set_language(Some("en"));
         params.set_no_context(true);
+        params.set_initial_prompt(&self.prompt);
+        params.set_temperature(0.0);
+        params.set_temperature_inc(0.2);
+        params.set_no_speech_thold(0.6);
+        params.set_suppress_blank(true);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);

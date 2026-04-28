@@ -3,6 +3,8 @@
 #![allow(deprecated)]
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
@@ -21,7 +23,9 @@ use objc2_foundation::{
 };
 
 use crate::autostart;
+use crate::dictation::{Dictation, Trigger};
 use crate::icon;
+use crate::overlay::OverlayState;
 use crate::perms::{self, MicState, PermStatus};
 
 const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
@@ -37,6 +41,9 @@ pub struct ControllerIvars {
     accessibility_waiting: Cell<bool>,
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
+    backend_checkbox: OnceCell<Retained<NSButton>>,
+    trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
+    overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
 }
 
 define_class!(
@@ -113,6 +120,26 @@ define_class!(
             self.refresh_perm_labels();
         }
 
+        #[unsafe(method(toggleBackend:))]
+        fn toggle_backend(&self, sender: Option<&AnyObject>) {
+            let want_parakeet = sender
+                .and_then(|s| s.downcast_ref::<NSButton>())
+                .map(|b| b.state() == NSControlStateValueOn)
+                .unwrap_or(false);
+            crate::prefs::set_backend(if want_parakeet { "parakeet" } else { "whisper" });
+
+            let Some(hub) = self.ivars().trigger_hub.get().cloned() else { return };
+            let Some(overlay) = self.ivars().overlay_state.get().cloned() else { return };
+
+            std::thread::spawn(move || {
+                let backend = crate::audio::ensure_model();
+                let (new_tx, new_rx) = std::sync::mpsc::channel();
+                Dictation::production(backend, overlay).start_processing(new_rx);
+                // Dropping the old sender signals the old pipeline thread to exit.
+                *hub.lock().unwrap() = new_tx;
+            });
+        }
+
         #[unsafe(method(toggleAutostart:))]
         fn toggle_autostart(&self, sender: Option<&AnyObject>) {
             let want_on = sender
@@ -150,6 +177,17 @@ impl AppController {
                 win.makeKeyAndOrderFront(None);
             }
             self.refresh_perm_labels();
+        }
+    }
+
+    fn refresh_backend(&self) {
+        let using_parakeet = crate::prefs::get_backend() == "parakeet";
+        if let Some(checkbox) = self.ivars().backend_checkbox.get() {
+            checkbox.setState(if using_parakeet {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
         }
     }
 
@@ -269,7 +307,11 @@ pub struct UiHandles {
     pub controller: Retained<AppController>,
 }
 
-pub fn install_menubar_and_window(mtm: MainThreadMarker) -> UiHandles {
+pub fn install_menubar_and_window(
+    mtm: MainThreadMarker,
+    trigger_hub: Arc<Mutex<Sender<Trigger>>>,
+    overlay_state: Arc<Mutex<OverlayState>>,
+) -> UiHandles {
     let controller = AppController::new(mtm);
 
     unsafe {
@@ -340,8 +382,12 @@ pub fn install_menubar_and_window(mtm: MainThreadMarker) -> UiHandles {
         let _ = controller.ivars().settings_window.set(window);
     }
 
+    let _ = controller.ivars().trigger_hub.set(trigger_hub);
+    let _ = controller.ivars().overlay_state.set(overlay_state);
+
     controller.refresh_perm_labels();
     controller.refresh_autostart();
+    controller.refresh_backend();
     UiHandles { controller }
 }
 
@@ -368,7 +414,7 @@ unsafe fn build_settings_window(
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable;
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 540.0));
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 680.0));
 
     let window: Retained<NSWindow> = NSWindow::initWithContentRect_styleMask_backing_defer(
         NSWindow::alloc(mtm),
@@ -449,6 +495,12 @@ unsafe fn build_settings_window(
 
     let autostart_box = build_autostart_card(mtm, controller);
     add_card(&stack, &autostart_box);
+
+    let transcription_heading = make_label(mtm, ns_string!("Transcription"), 14.0, true);
+    stack.addArrangedSubview(&transcription_heading);
+
+    let backend_box = build_backend_card(mtm, controller);
+    add_card(&stack, &backend_box);
 
     let footer = make_label(
         mtm,
@@ -645,6 +697,68 @@ unsafe fn build_autostart_card(
         .setActive(true);
 
     let _ = controller.ivars().autostart_checkbox.set(checkbox);
+
+    box_view
+}
+
+unsafe fn build_backend_card(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+) -> Retained<NSBox> {
+    let box_view = NSBox::new(mtm);
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setBorderType(objc2_app_kit::NSBorderType::LineBorder);
+    box_view.setBorderColor(&NSColor::separatorColor());
+    box_view.setCornerRadius(10.0);
+    box_view.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+    box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
+    box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let inner = NSStackView::new(mtm);
+    inner.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    inner.setSpacing(6.0);
+    inner.setAlignment(NSLayoutAttribute::Leading);
+    inner.setEdgeInsets(NSEdgeInsets {
+        top: 14.0,
+        left: 16.0,
+        bottom: 14.0,
+        right: 16.0,
+    });
+    inner.setDistribution(NSStackViewDistribution::Fill);
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let checkbox = NSButton::new(mtm);
+    checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    checkbox.setTitle(ns_string!("Use Parakeet TDT (parakeet-tdt-0.6b-v3)"));
+    let target_obj: &AnyObject = controller;
+    checkbox.setTarget(Some(target_obj));
+    checkbox.setAction(Some(sel!(toggleBackend:)));
+    inner.addArrangedSubview(&checkbox);
+
+    let desc = make_label(
+        mtm,
+        ns_string!("NVIDIA's 0.6B ONNX model — downloads ~300 MB on first use. Switches live in the background."),
+        11.0,
+        false,
+    );
+    desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    desc.setUsesSingleLineMode(false);
+    desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&desc);
+
+    box_view.setContentView(Some(&inner));
+
+    let inner_view: &NSView = &inner;
+    let box_super: &NSView = &box_view;
+    pin_view_to_parent(inner_view, box_super);
+
+    let desc_view: &NSView = &desc;
+    desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let _ = controller.ivars().backend_checkbox.set(checkbox);
 
     box_view
 }

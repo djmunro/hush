@@ -9,13 +9,13 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
-# If this script lives next to hush.py, use that checkout. Otherwise clone.
+# If this script lives next to Cargo.toml, use that checkout. Otherwise clone.
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/hush.py" ]]; then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/Cargo.toml" ]]; then
   SRC="$SCRIPT_DIR"
   echo "→ using local checkout at $SRC"
 else
@@ -42,13 +42,13 @@ fi
 
 cd "$SRC"
 
-if ! command -v python3 >/dev/null; then
+if ! command -v cmake >/dev/null; then
   if command -v brew >/dev/null; then
-    echo "→ installing Python via Homebrew"
-    brew install --quiet python@3.13
+    echo "→ installing cmake via Homebrew (needed to build whisper.cpp)"
+    brew install --quiet cmake
   else
     cat >&2 <<EOF
-Python 3 is missing. Install Homebrew first:
+cmake is missing. Install Homebrew first:
 
   /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
@@ -58,18 +58,28 @@ EOF
   fi
 fi
 
-if [[ ! -d .venv ]]; then
-  echo "→ creating venv"
-  python3 -m venv .venv
+if ! command -v cargo >/dev/null; then
+  if [[ -x "$HOME/.cargo/bin/cargo" ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+  else
+    echo "→ installing Rust toolchain via rustup"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
 fi
-echo "→ installing dependencies (this can take a minute)"
-./.venv/bin/pip install --quiet --no-cache-dir --upgrade pip
-./.venv/bin/pip install --quiet --no-cache-dir -r requirements.txt
 
-chmod +x hush
+echo "→ building hush (first build downloads + compiles whisper.cpp — ~3–5 min)"
+cargo build --release --quiet
+
+BIN="$SRC/target/release/hush"
+if [[ ! -x "$BIN" ]]; then
+  echo "build did not produce $BIN" >&2
+  exit 1
+fi
 
 mkdir -p "$HOME/.local/bin"
-ln -sf "$SRC/hush" "$HOME/.local/bin/hush"
+ln -sf "$BIN" "$HOME/.local/bin/hush"
 
 PLIST="$HOME/Library/LaunchAgents/com.djmunro.hush.plist"
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
@@ -82,7 +92,7 @@ cat > "$PLIST" <<EOF
     <string>com.djmunro.hush</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SRC/hush</string>
+        <string>$BIN</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -108,8 +118,6 @@ for i in 1 2 3 4 5; do
   sleep 1
 done
 
-PY_REAL=$(./.venv/bin/python -c "import os, sys; print(os.path.realpath(sys.executable))")
-
 cat <<EOF
 
 ✓ hush installed at $SRC
@@ -121,7 +129,7 @@ System Settings is opening two panes. In each:
   2. Click the + button
   3. Press Cmd+Shift+G, paste this path, hit Enter:
 
-       $PY_REAL
+       $BIN
 
   4. Click "Open" and toggle the entry ON
 

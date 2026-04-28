@@ -1,0 +1,18 @@
+[package]
+name = "hush"
+version = "0.1.0"
+edition = "2021"
+description = "Local push-to-talk dictation for macOS"
+license = "MIT"
+
+[dependencies]
+cpal = "0.17"
+whisper-rs = { version = "0.16", features = ["metal"] }
+core-foundation = "0.10"
+core-graphics = "0.25"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

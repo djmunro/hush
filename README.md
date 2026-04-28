@@ -2,80 +2,45 @@
 
 Local push-to-talk dictation for macOS. Hold **fn**, talk, release — Whisper transcribes and pastes at your cursor. No cloud, no always-on mic.
 
-## Why
-
-WisprFlow and other dictation tools listen continuously and ship audio off-device. hush does neither: the mic is closed at rest, only opens while you're holding fn, and transcription runs locally on CPU via [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
-
 ## Install
-
-One line:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/djmunro/hush/main/install.sh | bash
 ```
 
-The installer clones the repo to `~/.local/share/hush`, creates a Python venv, downloads dependencies, registers a `launchd` agent so hush auto-starts at login, opens the two System Settings panes you need, and prints the binary path to add.
-
-Prereqs that get auto-installed if missing: Xcode Command Line Tools (for git), Homebrew (you'll need to install this manually if absent), Python 3.13.
+Installs `cmake` + the Rust toolchain if missing, builds the binary (~3–5 min the first time while whisper.cpp compiles), registers a `launchd` agent, and opens the two permission panes you need.
 
 ## Permissions
 
-macOS requires two permissions, both in **System Settings → Privacy & Security**. The installer prints the binary path to add — drag it in or click `+`.
+Both in **System Settings → Privacy & Security**. Add `~/.local/share/hush/target/release/hush` (or wherever your checkout is) to:
 
-| Permission | Why |
+| Pane | Why |
 |---|---|
-| **Accessibility** | Sends Cmd+V to paste transcribed text |
-| **Input Monitoring** | Detects fn key press/release |
+| Input Monitoring | Detect fn key |
+| Accessibility    | Send Cmd+V to paste |
 
-After granting, restart the agent:
+After granting:
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.djmunro.hush
 ```
 
-If macOS' built-in fn behavior gets in the way (emoji picker, dictation), set **System Settings → Keyboard → Press 🌐/fn key to:** to "Do Nothing".
+If macOS' fn behavior gets in the way, set **Settings → Keyboard → Press 🌐/fn key to:** "Do Nothing".
 
 ## Usage
 
-- **Press and hold fn** → Tink sound, mic opens
-- **Talk**
-- **Release fn** → Pop sound, transcription runs, text pastes at cursor
+Hold **fn** → Tink, mic opens. Talk. Release **fn** → Pop, transcribe, paste.
 
-## Customization
-
-| Knob | How |
-|---|---|
-| Whisper model | `WHISPER_MODEL=base.en hush` (`tiny.en`, `base.en`, `small.en`, `medium.en`) |
-| Hotkey | Edit `FN_FLAG` in `hush.py` (uses Quartz `kCGEventFlagMask*` constants) |
-
-`small.en` is the default — best accuracy/speed tradeoff for English on Apple Silicon CPU. `base.en` is ~2× faster with slightly worse accuracy.
-
-## Manage
-
-```bash
-hush                                                  # run manually (foreground)
-tail -f ~/Library/Logs/hush.log                       # logs
-launchctl bootout gui/$(id -u)/com.djmunro.hush       # stop agent
-launchctl bootstrap gui/$(id -u) \
-  ~/Library/LaunchAgents/com.djmunro.hush.plist       # start agent
-./uninstall.sh                                        # remove agent + symlinks
-```
+`WHISPER_MODEL=base.en hush` to swap models (`tiny.en` / `base.en` / `small.en` / `medium.en`). Default `small.en`. Models cache in `~/.cache/hush/models`.
 
 ## Troubleshooting
 
-**Nothing happens when I press fn.** Check `tail -f ~/Library/Logs/hush.log`. If you see "event tap unavailable" or "Input Monitoring not granted", the binary isn't approved. Re-add it in Input Monitoring and run `launchctl kickstart -k gui/$(id -u)/com.djmunro.hush`.
-
-**Paste fails with "not allowed to send keystrokes".** Accessibility permission missing. Add the same binary to the Accessibility list.
-
-**First word or two gets cut off.** CoreAudio takes ~150–300 ms to open the mic on press. Pause briefly between Tink and speaking.
-
-**Transcription too slow.** Try `WHISPER_MODEL=base.en` or `tiny.en`. Default is `small.en`.
+- **Nothing happens on fn.** `tail -f ~/Library/Logs/hush.log`. If you see "Input Monitoring not granted" or "event tap unavailable", the binary isn't approved — re-add it and `launchctl kickstart -k gui/$(id -u)/com.djmunro.hush`.
+- **Permissions broke after rebuild.** macOS ties grants to the binary's content hash. Remove and re-add the binary in both Privacy panes after each `cargo build --release`.
+- **Paste fails with "not allowed to send keystrokes".** Add the binary to Accessibility.
+- **First word cut off.** CoreAudio takes ~150–300 ms to open the mic. Pause briefly between Tink and speaking.
 
 ## Stack
 
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2 port of Whisper, int8 quantized
-- [sounddevice](https://python-sounddevice.readthedocs.io) — PortAudio bindings for mic input
-- Quartz `CGEventTap` — fn key detection (via [pyobjc](https://pyobjc.readthedocs.io))
-
-## License
+[whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [whisper-rs](https://github.com/tazz4843/whisper-rs) (Metal on Apple Silicon) · [cpal](https://github.com/RustAudio/cpal) for mic · `CGEventTap` for fn key.
 
 MIT.

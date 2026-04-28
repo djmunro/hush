@@ -116,10 +116,18 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 EOF
 
 # --- Ad-hoc sign --------------------------------------------------------
-# Without any signature TCC will sometimes refuse to remember the
-# bundle's permissions across launches. Ad-hoc signing (-s -) gives the
-# bundle a stable code-design identity tied to its bundle ID.
+# Ad-hoc signing (-s -) gives the bundle a stable code identity tied to
+# its bundle ID, which TCC uses to associate permissions.
+#
+# We deliberately do NOT pass --options runtime (the hardened runtime).
+# The hardened runtime gates microphone/Accessibility access on
+# explicit entitlements (com.apple.security.device.audio-input etc.),
+# and silently denies the request — without ever firing a prompt — when
+# those entitlements are absent. For ad-hoc local dev we don't ship
+# entitlements, so leave hardened runtime off. (Production / notarized
+# distribution would need both: the runtime flag AND an Entitlements
+# plist signed alongside.)
 echo "→ ad-hoc signing"
-codesign --sign - --force --deep --options runtime "$APP_DIR" >/dev/null
+codesign --sign - --force --deep "$APP_DIR" >/dev/null
 
 echo "✓ ${APP_DIR}"

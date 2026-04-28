@@ -44,6 +44,7 @@ pub struct ControllerIvars {
     backend_checkbox: OnceCell<Retained<NSButton>>,
     trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
     overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
+    backend_switch_lock: OnceCell<Arc<Mutex<()>>>,
 }
 
 define_class!(
@@ -130,9 +131,11 @@ define_class!(
 
             let Some(hub) = self.ivars().trigger_hub.get().cloned() else { return };
             let Some(overlay) = self.ivars().overlay_state.get().cloned() else { return };
+            let Some(switch_lock) = self.ivars().backend_switch_lock.get().cloned() else { return };
 
             std::thread::spawn(move || {
-                let backend = crate::audio::ensure_model();
+                let _guard = switch_lock.lock().unwrap();
+                let backend = crate::audio::ensure_backend_model(want_parakeet);
                 let (new_tx, new_rx) = std::sync::mpsc::channel();
                 Dictation::production(backend, overlay).start_processing(new_rx);
                 // Dropping the old sender signals the old pipeline thread to exit.
@@ -384,6 +387,10 @@ pub fn install_menubar_and_window(
 
     let _ = controller.ivars().trigger_hub.set(trigger_hub);
     let _ = controller.ivars().overlay_state.set(overlay_state);
+    let _ = controller
+        .ivars()
+        .backend_switch_lock
+        .set(Arc::new(Mutex::new(())));
 
     controller.refresh_perm_labels();
     controller.refresh_autostart();

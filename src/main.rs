@@ -3,6 +3,7 @@
 mod audio;
 mod icon;
 mod keyboard;
+mod overlay;
 mod perms;
 mod ui;
 
@@ -34,10 +35,16 @@ fn main() {
         perms::request_input_monitoring();
     }
 
+    let overlay_state = overlay::OverlayState::new();
+    // Overlay controller must be created on the main thread; it owns
+    // its own NSTimer that drives show/hide + redraws.
+    let _overlay_ctrl = overlay::OverlayController::install(mtm, overlay_state.clone());
+
     let (tx, rx) = mpsc::channel::<audio::Msg>();
+    let worker_overlay = overlay_state.clone();
     std::thread::spawn(move || {
         let model_path = audio::ensure_model();
-        audio::run_worker(&model_path, rx);
+        audio::run_worker(&model_path, rx, worker_overlay);
     });
 
     let tap_handle = TapHandle::new(tx);

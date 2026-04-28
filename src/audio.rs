@@ -14,6 +14,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::keyboard;
+use crate::overlay::{OverlayMode, OverlayState};
 
 const SAMPLE_RATE: u32 = 16_000;
 const MIN_SAMPLES: usize = (SAMPLE_RATE as f32 * 0.3) as usize;
@@ -74,14 +75,16 @@ struct Recorder {
     buf: Arc<Mutex<Vec<f32>>>,
     stream: Option<cpal::Stream>,
     src_rate: u32,
+    overlay: Arc<Mutex<OverlayState>>,
 }
 
 impl Recorder {
-    fn new() -> Self {
+    fn new(overlay: Arc<Mutex<OverlayState>>) -> Self {
         Self {
             buf: Arc::new(Mutex::new(Vec::new())),
             stream: None,
             src_rate: SAMPLE_RATE,
+            overlay,
         }
     }
 
@@ -107,26 +110,44 @@ impl Recorder {
         let err_cb = |err| eprintln!("[hush] stream error: {err}");
 
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                &config,
-                move |data: &[f32], _| append_mono(&buf, data, channels, |s| s),
-                err_cb,
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                &config,
-                move |data: &[i16], _| append_mono(&buf, data, channels, |s| s as f32 / 32768.0),
-                err_cb,
-                None,
-            ),
-            cpal::SampleFormat::U16 => device.build_input_stream(
-                &config,
-                move |data: &[u16], _| {
-                    append_mono(&buf, data, channels, |s| (s as f32 - 32768.0) / 32768.0)
-                },
-                err_cb,
-                None,
-            ),
+            cpal::SampleFormat::F32 => {
+                let buf = Arc::clone(&buf);
+                let overlay = Arc::clone(&self.overlay);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[f32], _| {
+                        append_mono(&buf, &overlay, data, channels, |s| s);
+                    },
+                    err_cb,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let buf = Arc::clone(&buf);
+                let overlay = Arc::clone(&self.overlay);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[i16], _| {
+                        append_mono(&buf, &overlay, data, channels, |s| s as f32 / 32768.0);
+                    },
+                    err_cb,
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let buf = Arc::clone(&buf);
+                let overlay = Arc::clone(&self.overlay);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[u16], _| {
+                        append_mono(&buf, &overlay, data, channels, |s| {
+                            (s as f32 - 32768.0) / 32768.0
+                        });
+                    },
+                    err_cb,
+                    None,
+                )
+            }
             other => return Err(format!("unsupported sample format: {other:?}")),
         }
         .map_err(|e| e.to_string())?;
@@ -148,12 +169,14 @@ impl Recorder {
 
 fn append_mono<S: Copy>(
     buf: &Arc<Mutex<Vec<f32>>>,
+    overlay: &Arc<Mutex<OverlayState>>,
     data: &[S],
     channels: u16,
     to_f32: impl Fn(S) -> f32,
 ) {
     let n = channels as usize;
     let mut guard = buf.lock().unwrap();
+    let start_len = guard.len();
     if n <= 1 {
         guard.extend(data.iter().copied().map(to_f32));
     } else {
@@ -162,6 +185,21 @@ fn append_mono<S: Copy>(
             let sum: f32 = frame.iter().copied().map(&to_f32).sum();
             guard.push(sum * inv);
         }
+    }
+
+    // Compute RMS of the just-appended chunk and push it to the
+    // overlay so the bars track live mic input. This runs on the cpal
+    // audio thread; the lock is uncontended in practice (UI reads at
+    // 30Hz, audio writes at ~50Hz).
+    let new_slice = &guard[start_len..];
+    if !new_slice.is_empty() {
+        let sum_sq: f32 = new_slice.iter().map(|x| x * x).sum();
+        let rms = (sum_sq / new_slice.len() as f32).sqrt();
+        // Map to a useful display range — typical speech RMS is 0.02-0.2,
+        // so amplify to fill the bar-height domain.
+        let display = (rms * 6.0).min(1.0);
+        drop(guard);
+        OverlayState::push_level(overlay, display);
     }
 }
 
@@ -183,7 +221,7 @@ fn resample_to_16k(input: &[f32], src_rate: u32) -> Vec<f32> {
     out
 }
 
-pub fn run_worker(model_path: &Path, rx: Receiver<Msg>) {
+pub fn run_worker(model_path: &Path, rx: Receiver<Msg>, overlay: Arc<Mutex<OverlayState>>) {
     eprintln!("[hush] loading model…");
     let ctx = WhisperContext::new_with_params(
         model_path.to_str().expect("utf-8 model path"),
@@ -191,15 +229,17 @@ pub fn run_worker(model_path: &Path, rx: Receiver<Msg>) {
     )
     .expect("load whisper model");
 
-    let mut rec = Recorder::new();
+    let mut rec = Recorder::new(Arc::clone(&overlay));
     eprintln!("[hush] ready. hold fn to dictate.");
 
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Start => {
                 play(START_SOUND);
+                OverlayState::set_mode(&overlay, OverlayMode::Recording);
                 if let Err(e) = rec.start() {
                     eprintln!("[hush] failed to start recording: {e}");
+                    OverlayState::set_mode(&overlay, OverlayMode::Hidden);
                 }
             }
             Msg::Stop => {
@@ -207,47 +247,52 @@ pub fn run_worker(model_path: &Path, rx: Receiver<Msg>) {
                 play(STOP_SOUND);
                 if audio.len() < MIN_SAMPLES {
                     eprintln!("[hush] too short, skipping");
+                    OverlayState::set_mode(&overlay, OverlayMode::Hidden);
                     continue;
                 }
+                OverlayState::set_mode(&overlay, OverlayMode::Transcribing);
                 let t0 = Instant::now();
-                let mut state = match ctx.create_state() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[hush] state error: {e}");
-                        continue;
+                let result = transcribe(&ctx, &audio);
+                OverlayState::set_mode(&overlay, OverlayMode::Hidden);
+                let elapsed = t0.elapsed().as_secs_f32();
+                match result {
+                    Ok(text) if text.is_empty() => {
+                        eprintln!("[hush] no speech detected ({:.1}s)", elapsed);
                     }
-                };
-                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-                params.set_language(Some("en"));
-                params.set_no_context(true);
-                params.set_print_special(false);
-                params.set_print_progress(false);
-                params.set_print_realtime(false);
-                params.set_print_timestamps(false);
-                if let Err(e) = state.full(params, &audio) {
-                    eprintln!("[hush] transcribe error: {e}");
-                    continue;
-                }
-                let n = state.full_n_segments();
-                let mut text = String::new();
-                for i in 0..n {
-                    if let Some(seg) = state.get_segment(i) {
-                        if let Ok(s) = seg.to_str_lossy() {
-                            text.push_str(&s);
+                    Ok(text) => {
+                        eprintln!("[hush] ({:.1}s) {}", elapsed, text);
+                        if let Err(e) = keyboard::paste(&text) {
+                            eprintln!("[hush] paste failed: {e}");
                         }
                     }
-                }
-                let text = text.trim().to_string();
-                let elapsed = t0.elapsed().as_secs_f32();
-                if text.is_empty() {
-                    eprintln!("[hush] no speech detected ({:.1}s)", elapsed);
-                    continue;
-                }
-                eprintln!("[hush] ({:.1}s) {}", elapsed, text);
-                if let Err(e) = keyboard::paste(&text) {
-                    eprintln!("[hush] paste failed: {e}");
+                    Err(e) => eprintln!("[hush] {e}"),
                 }
             }
         }
     }
+}
+
+fn transcribe(ctx: &WhisperContext, audio: &[f32]) -> Result<String, String> {
+    let mut state = ctx.create_state().map_err(|e| format!("state error: {e}"))?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_language(Some("en"));
+    params.set_no_context(true);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    state
+        .full(params, audio)
+        .map_err(|e| format!("transcribe error: {e}"))?;
+
+    let n = state.full_n_segments();
+    let mut text = String::new();
+    for i in 0..n {
+        if let Some(seg) = state.get_segment(i) {
+            if let Ok(s) = seg.to_str_lossy() {
+                text.push_str(&s);
+            }
+        }
+    }
+    Ok(text.trim().to_string())
 }

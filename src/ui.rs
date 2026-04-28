@@ -21,6 +21,7 @@ use objc2_foundation::{
 
 use crate::icon;
 use crate::perms::{self, MicState, PermStatus};
+use crate::TapHandle;
 
 const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 
@@ -32,6 +33,7 @@ pub struct ControllerIvars {
     mic_button: OnceCell<Retained<NSButton>>,
     input_status_label: OnceCell<Retained<NSTextField>>,
     accessibility_status_label: OnceCell<Retained<NSTextField>>,
+    tap_handle: OnceCell<TapHandle>,
 }
 
 define_class!(
@@ -68,6 +70,12 @@ define_class!(
         #[unsafe(method(grantInputMonitoring:))]
         fn grant_input_monitoring(&self, _sender: Option<&AnyObject>) {
             perms::request_input_monitoring();
+            // Touch the Input Monitoring API path one more time by
+            // attempting a tap install — this nudges TCC to add hush
+            // to the System Settings list right now.
+            if let Some(handle) = self.ivars().tap_handle.get() {
+                handle.try_install();
+            }
             perms::open_input_monitoring_pane();
             self.refresh_perm_labels();
         }
@@ -106,6 +114,11 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: Option<&AnyObject>) {
             self.refresh_perm_labels();
+            // Once Input Monitoring is granted, lazily install the
+            // event tap so dictation works without an app restart.
+            if let Some(handle) = self.ivars().tap_handle.get() {
+                handle.try_install();
+            }
         }
     }
 
@@ -186,8 +199,9 @@ pub struct UiHandles {
     pub controller: Retained<AppController>,
 }
 
-pub fn install_menubar_and_window(mtm: MainThreadMarker) -> UiHandles {
+pub fn install_menubar_and_window(mtm: MainThreadMarker, tap_handle: TapHandle) -> UiHandles {
     let controller = AppController::new(mtm);
+    let _ = controller.ivars().tap_handle.set(tap_handle);
 
     unsafe {
         let app = NSApplication::sharedApplication(mtm);

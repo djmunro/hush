@@ -1,18 +1,43 @@
 #!/bin/bash
+# Removes Hush.app, any auto-start LaunchAgent, the legacy bare-binary
+# symlink, and resets the TCC entries for our bundle ID. Leaves the
+# whisper model cache (~/.cache/hush) in place — re-installing later
+# skips the model download.
+
 set -euo pipefail
 
-# Stop and remove the legacy LaunchAgent (older installs only).
-launchctl bootout "gui/$(id -u)/com.djmunro.hush" 2>/dev/null || true
-rm -f "$HOME/Library/LaunchAgents/com.djmunro.hush.plist"
-rm -f "$HOME/.local/bin/hush"
-
-# Quit any running Hush.app, then remove it.
+# Quit any running instance.
 osascript -e 'tell application "Hush" to quit' 2>/dev/null || true
 pkill -f 'Hush.app/Contents/MacOS/hush' 2>/dev/null || true
+pkill -x hush 2>/dev/null || true
+
+# Remove the auto-start LaunchAgent (whether installed via the new
+# in-app checkbox or the legacy install.sh).
+launchctl bootout "gui/$(id -u)/com.djmunro.hush" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/com.djmunro.hush.plist"
+
+# Legacy bare-binary symlink.
+rm -f "$HOME/.local/bin/hush"
+
+# The bundle.
+rm -rf "/Applications/Hush.app"
 rm -rf "$HOME/Applications/Hush.app"
 
-echo "uninstalled. (model cache at ~/.cache/hush left in place)"
-echo
-echo "If \"hush\" or \"python3.14\" still appear in System Settings →"
-echo "Privacy & Security → Input Monitoring / Accessibility, click each"
-echo "and hit the - button to fully remove."
+# Reset TCC for our bundle ID so a future reinstall starts clean.
+for svc in Microphone Accessibility ListenEvent; do
+    tccutil reset "$svc" com.djmunro.hush >/dev/null 2>&1 || true
+done
+
+cat <<EOF
+uninstalled.
+
+Left alone:
+  - ~/.cache/hush (whisper model cache — saves the redownload on reinstall)
+  - ~/.local/share/hush (source clone, if you used the source install)
+
+Manual cleanup if you want a complete reset:
+  - System Settings → Privacy & Security → Microphone / Input Monitoring /
+    Accessibility — click any "hush" or "python3.14" entries and hit -
+    to remove them. (We can't always do this from a script — TCC
+    permissions for tccutil are per-installer.)
+EOF

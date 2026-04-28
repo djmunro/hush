@@ -1,16 +1,17 @@
 #!/bin/bash
-# hush installer — builds the .app bundle and drops it in ~/Applications.
-# After install, open Hush.app once; it lives in your menubar with a
-# Settings window guiding the macOS permission grants.
+# hush installer — builds Hush.app from source and drops it in
+# /Applications. After install, the app opens once; the Settings window
+# auto-launches and walks through the three permissions.
 #
-# No LaunchAgent: macOS Login Items handles "open at login" via the
-# Settings app, which is the modern way for menubar accessory apps.
+# No LaunchAgent: hush is LSUIElement=true (a menubar accessory). If the
+# user wants auto-start at login, the Settings window has a checkbox
+# for it.
 
 set -euo pipefail
 
 REPO_URL="https://github.com/djmunro/hush.git"
 INSTALL_DIR="$HOME/.local/share/hush"
-APPS_DIR="$HOME/Applications"
+DEST_APP="/Applications/Hush.app"
 
 if [[ "$(uname)" != "Darwin" ]]; then
     echo "hush is macOS-only." >&2
@@ -48,7 +49,6 @@ fi
 
 cd "$SRC"
 
-# Toolchain dependencies
 if ! command -v cmake >/dev/null; then
     if command -v brew >/dev/null; then
         echo "→ installing cmake via Homebrew (needed to build whisper.cpp)"
@@ -76,51 +76,62 @@ if ! command -v cargo >/dev/null; then
     fi
 fi
 
-# Build .app bundle (cargo build + Info.plist + .icns + ad-hoc sign)
-echo "→ building Hush.app (first build downloads + compiles whisper.cpp — ~3–5 min)"
+# Build the .app bundle (cargo build + Info.plist + .icns + ad-hoc sign).
+# Hardened runtime is deliberately OFF — see docs/macos-permissions.md.
+echo "→ building Hush.app (first build takes ~3–5 min while whisper.cpp compiles)"
 bash "$SRC/scripts/build-app.sh"
 
 BUILT_APP="$SRC/target/release/Hush.app"
-DEST_APP="$APPS_DIR/Hush.app"
 
-mkdir -p "$APPS_DIR"
-rm -rf "$DEST_APP"
-cp -R "$BUILT_APP" "$DEST_APP"
+# Quit any running instance so we don't fight the file copy.
+osascript -e 'tell application "Hush" to quit' 2>/dev/null || true
+pkill -f "Hush.app/Contents/MacOS/hush" 2>/dev/null || true
 
-# Clean up legacy LaunchAgent + symlink from older installs.
+# Clean up the legacy LaunchAgent + symlink from the pre-bundle install layout.
 LEGACY_PLIST="$HOME/Library/LaunchAgents/com.djmunro.hush.plist"
 if [[ -f "$LEGACY_PLIST" ]]; then
-    echo "→ removing legacy LaunchAgent (the new bundle uses Login Items instead)"
+    echo "→ removing legacy LaunchAgent (pre-bundle install)"
     launchctl bootout "gui/$(id -u)/com.djmunro.hush" 2>/dev/null || true
     rm -f "$LEGACY_PLIST"
 fi
-if [[ -L "$HOME/.local/bin/hush" ]]; then
-    rm -f "$HOME/.local/bin/hush"
-fi
+[[ -L "$HOME/.local/bin/hush" ]] && rm -f "$HOME/.local/bin/hush"
+
+# Reset TCC for our bundle ID — clears any sticky Denied state from a
+# previous (now-invalidated) cdhash. Harmless on first install.
+for svc in Microphone Accessibility ListenEvent; do
+    tccutil reset "$svc" com.djmunro.hush >/dev/null 2>&1 || true
+done
+
+# Swap the installed bundle.
+echo "→ installing to $DEST_APP"
+sleep 0.5
+rm -rf "$DEST_APP"
+cp -R "$BUILT_APP" "$DEST_APP"
 
 cat <<EOF
 
 ✓ installed Hush.app at $DEST_APP
 
-Next:
-  1. Open Hush.app — it lives in your menubar (top-right).
-  2. The Settings window auto-opens if any permission is missing:
-     • Microphone        — single in-app prompt (one click).
-     • Input Monitoring  — opens System Settings, toggle Hush ON.
-     • Accessibility     — opens System Settings, toggle Hush ON.
-  3. (Optional) For "open at login": System Settings → General → Login
-     Items → + → Hush.app.
+What happens now:
+  - Hush.app appears in your menubar (top-right).
+  - Settings window auto-opens because perms are unset.
+  - Click "Allow microphone" → standard system prompt → Allow.
+  - Click "Open Input Monitoring…" → toggle Hush ON in System Settings.
+  - Click "Open Accessibility…" → toggle Hush ON in System Settings.
+  - The Settings window has an "Open at login" checkbox.
 
 Then hold the fn key anywhere on macOS, talk, release. Text appears at your cursor.
 
-If you previously installed the bare-binary version of hush, you may
-have stale entries named "python3.14" or "hush" in System Settings →
-Privacy & Security → Input Monitoring / Accessibility. Click each one
-and hit the - button to remove. The new bundle re-registers under its
-own bundle ID (${BUNDLE_ID:-com.djmunro.hush}), so future grants stick.
+Stale entries to clean up MANUALLY in System Settings →
+Privacy & Security → Microphone / Input Monitoring / Accessibility:
+  - "hush" with the generic green exec icon (old bare-binary install)
+  - "python3.14" (old osascript misattribution — fixed in current builds)
 
-Manual run:  open "$DEST_APP"
-Uninstall:   $SRC/uninstall.sh
+Click each and hit the - button. The new Hush.app will register fresh
+under its own bundle ID, com.djmunro.hush.
+
+Uninstall:  bash $SRC/uninstall.sh
+Dev loop:   bash $SRC/scripts/install-dev.sh   (rebuilds + re-grants)
 EOF
 
 open "$DEST_APP"

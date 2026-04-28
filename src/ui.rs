@@ -9,9 +9,10 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
-    NSBoxType, NSButton, NSColor, NSControlSize, NSFont, NSLayoutAttribute, NSLineBreakMode,
-    NSMenu, NSMenuItem, NSStackView, NSStackViewDistribution, NSStatusBar, NSStatusItem,
-    NSTextField, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
+    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSStackView,
+    NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -19,6 +20,7 @@ use objc2_foundation::{
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
 
+use crate::autostart;
 use crate::icon;
 use crate::perms::{self, MicState, PermStatus};
 use crate::TapHandle;
@@ -33,6 +35,7 @@ pub struct ControllerIvars {
     mic_button: OnceCell<Retained<NSButton>>,
     input_status_label: OnceCell<Retained<NSTextField>>,
     accessibility_status_label: OnceCell<Retained<NSTextField>>,
+    autostart_checkbox: OnceCell<Retained<NSButton>>,
     tap_handle: OnceCell<TapHandle>,
 }
 
@@ -120,6 +123,23 @@ define_class!(
                 handle.try_install();
             }
         }
+
+        #[unsafe(method(toggleAutostart:))]
+        fn toggle_autostart(&self, sender: Option<&AnyObject>) {
+            let want_on = sender
+                .and_then(|s| s.downcast_ref::<NSButton>())
+                .map(|b| b.state() == NSControlStateValueOn)
+                .unwrap_or(false);
+            let result = if want_on {
+                autostart::enable()
+            } else {
+                autostart::disable()
+            };
+            if let Err(e) = result {
+                eprintln!("[hush] autostart toggle failed: {e}");
+            }
+            self.refresh_autostart();
+        }
     }
 
     unsafe impl NSObjectProtocol for AppController {}
@@ -141,6 +161,17 @@ impl AppController {
                 win.makeKeyAndOrderFront(None);
             }
             self.refresh_perm_labels();
+        }
+    }
+
+    fn refresh_autostart(&self) {
+        let enabled = autostart::is_enabled();
+        if let Some(checkbox) = self.ivars().autostart_checkbox.get() {
+            checkbox.setState(if enabled {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
         }
     }
 
@@ -272,6 +303,7 @@ pub fn install_menubar_and_window(mtm: MainThreadMarker, tap_handle: TapHandle) 
     }
 
     controller.refresh_perm_labels();
+    controller.refresh_autostart();
     UiHandles { controller }
 }
 
@@ -383,6 +415,13 @@ unsafe fn build_settings_window(
         },
     );
     add_card(&stack, &acc_card);
+
+    // Auto-start at login — backed by ~/Library/LaunchAgents/com.djmunro.hush.plist.
+    let autostart_heading = make_label(mtm, ns_string!("General"), 14.0, true);
+    stack.addArrangedSubview(&autostart_heading);
+
+    let autostart_box = build_autostart_card(mtm, controller);
+    add_card(&stack, &autostart_box);
 
     let footer = make_label(
         mtm,
@@ -517,6 +556,68 @@ unsafe fn build_card(
         button,
     };
     register(&labels);
+
+    box_view
+}
+
+unsafe fn build_autostart_card(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+) -> Retained<NSBox> {
+    let box_view = NSBox::new(mtm);
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setBorderType(objc2_app_kit::NSBorderType::LineBorder);
+    box_view.setBorderColor(&NSColor::separatorColor());
+    box_view.setCornerRadius(10.0);
+    box_view.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+    box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
+    box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let inner = NSStackView::new(mtm);
+    inner.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    inner.setSpacing(6.0);
+    inner.setAlignment(NSLayoutAttribute::Leading);
+    inner.setEdgeInsets(NSEdgeInsets {
+        top: 14.0,
+        left: 16.0,
+        bottom: 14.0,
+        right: 16.0,
+    });
+    inner.setDistribution(NSStackViewDistribution::Fill);
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let checkbox = NSButton::new(mtm);
+    checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    checkbox.setTitle(ns_string!("Open Hush at login"));
+    let target_obj: &AnyObject = controller;
+    checkbox.setTarget(Some(target_obj));
+    checkbox.setAction(Some(sel!(toggleAutostart:)));
+    inner.addArrangedSubview(&checkbox);
+
+    let desc = make_label(
+        mtm,
+        ns_string!("Manages a per-user LaunchAgent that opens Hush.app at login."),
+        11.0,
+        false,
+    );
+    desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    desc.setUsesSingleLineMode(false);
+    desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&desc);
+
+    box_view.setContentView(Some(&inner));
+
+    let inner_view: &NSView = &inner;
+    let box_super: &NSView = &box_view;
+    pin_view_to_parent(inner_view, box_super);
+
+    let desc_view: &NSView = &desc;
+    desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let _ = controller.ivars().autostart_checkbox.set(checkbox);
 
     box_view
 }

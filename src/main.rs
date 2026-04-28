@@ -1,6 +1,7 @@
 //! hush — local push-to-talk dictation. Hold fn, talk, release to paste.
 
 mod audio;
+mod autostart;
 mod icon;
 mod keyboard;
 mod overlay;

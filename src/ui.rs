@@ -2,7 +2,7 @@
 
 #![allow(deprecated)]
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
@@ -34,7 +34,13 @@ pub struct ControllerIvars {
     mic_status_label: OnceCell<Retained<NSTextField>>,
     mic_button: OnceCell<Retained<NSButton>>,
     input_status_label: OnceCell<Retained<NSTextField>>,
+    input_button: OnceCell<Retained<NSButton>>,
+    input_waiting: Cell<bool>,
+    input_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     accessibility_status_label: OnceCell<Retained<NSTextField>>,
+    accessibility_button: OnceCell<Retained<NSButton>>,
+    accessibility_waiting: Cell<bool>,
+    accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
     tap_handle: OnceCell<TapHandle>,
 }
@@ -72,21 +78,35 @@ define_class!(
 
         #[unsafe(method(grantInputMonitoring:))]
         fn grant_input_monitoring(&self, _sender: Option<&AnyObject>) {
+            // Force-register the binary in TCC's Input Monitoring
+            // list so the user has something to toggle in Settings.
+            // We deliberately do NOT call try_install here: every
+            // CGEventTapCreate against an unauthorized cdhash
+            // re-fires the TCC prompt. The polling tick will install
+            // exactly once, after the perm flips to granted.
             perms::request_input_monitoring();
-            // Touch the Input Monitoring API path one more time by
-            // attempting a tap install — this nudges TCC to add hush
-            // to the System Settings list right now.
-            if let Some(handle) = self.ivars().tap_handle.get() {
-                handle.try_install();
-            }
             perms::open_input_monitoring_pane();
-            self.refresh_perm_labels();
+            self.start_input_wait();
         }
 
         #[unsafe(method(grantAccessibility:))]
         fn grant_accessibility(&self, _sender: Option<&AnyObject>) {
             perms::request_accessibility();
             perms::open_accessibility_pane();
+            self.start_accessibility_wait();
+        }
+
+        #[unsafe(method(inputWaitTimeout:))]
+        fn input_wait_timeout(&self, _timer: Option<&AnyObject>) {
+            self.ivars().input_waiting.set(false);
+            self.ivars().input_wait_timer.replace(None);
+            self.refresh_perm_labels();
+        }
+
+        #[unsafe(method(accessibilityWaitTimeout:))]
+        fn accessibility_wait_timeout(&self, _timer: Option<&AnyObject>) {
+            self.ivars().accessibility_waiting.set(false);
+            self.ivars().accessibility_wait_timer.replace(None);
             self.refresh_perm_labels();
         }
 
@@ -117,11 +137,6 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: Option<&AnyObject>) {
             self.refresh_perm_labels();
-            // Once Input Monitoring is granted, lazily install the
-            // event tap so dictation works without an app restart.
-            if let Some(handle) = self.ivars().tap_handle.get() {
-                handle.try_install();
-            }
         }
 
         #[unsafe(method(toggleAutostart:))]
@@ -178,6 +193,34 @@ impl AppController {
     fn refresh_perm_labels(&self) {
         let status = PermStatus::check();
         let mic_granted = status.mic_granted();
+
+        // If a perm flipped to granted while we were in the
+        // "Waiting…" window, clear the wait so the UI reflects
+        // the grant immediately and the timeout doesn't fire
+        // a redundant refresh.
+        if status.input_monitoring && self.ivars().input_waiting.get() {
+            self.ivars().input_waiting.set(false);
+            if let Some(t) = self.ivars().input_wait_timer.replace(None) {
+                t.invalidate();
+            }
+        }
+        if status.accessibility && self.ivars().accessibility_waiting.get() {
+            self.ivars().accessibility_waiting.set(false);
+            if let Some(t) = self.ivars().accessibility_wait_timer.replace(None) {
+                t.invalidate();
+            }
+        }
+
+        // Lazily install the event tap exactly once, the moment
+        // Input Monitoring becomes granted. TapHandle::try_install
+        // consumes its sender on attempt, so this is safe to call
+        // every refresh — subsequent calls are a no-op.
+        if status.input_monitoring {
+            if let Some(handle) = self.ivars().tap_handle.get() {
+                handle.try_install();
+            }
+        }
+
         unsafe {
             if let Some(label) = self.ivars().mic_status_label.get() {
                 label.setStringValue(&mic_status_text(status.microphone));
@@ -196,11 +239,81 @@ impl AppController {
                 label.setStringValue(&perm_status_text(status.input_monitoring));
                 label.setTextColor(Some(&perm_color(status.input_monitoring)));
             }
+            if let Some(button) = self.ivars().input_button.get() {
+                self.apply_grant_button(
+                    button,
+                    status.input_monitoring,
+                    self.ivars().input_waiting.get(),
+                    ns_string!("Open Input Monitoring…"),
+                );
+            }
             if let Some(label) = self.ivars().accessibility_status_label.get() {
                 label.setStringValue(&perm_status_text(status.accessibility));
                 label.setTextColor(Some(&perm_color(status.accessibility)));
             }
+            if let Some(button) = self.ivars().accessibility_button.get() {
+                self.apply_grant_button(
+                    button,
+                    status.accessibility,
+                    self.ivars().accessibility_waiting.get(),
+                    ns_string!("Open Accessibility…"),
+                );
+            }
         }
+    }
+
+    unsafe fn apply_grant_button(
+        &self,
+        button: &NSButton,
+        granted: bool,
+        waiting: bool,
+        idle_title: &NSString,
+    ) {
+        let title = if granted {
+            ns_string!("Granted")
+        } else if waiting {
+            ns_string!("Waiting…")
+        } else {
+            idle_title
+        };
+        button.setTitle(title);
+        button.setEnabled(!granted && !waiting);
+    }
+
+    fn start_input_wait(&self) {
+        self.ivars().input_waiting.set(true);
+        let timer = unsafe {
+            let target: &AnyObject = self;
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                10.0,
+                target,
+                sel!(inputWaitTimeout:),
+                None,
+                false,
+            )
+        };
+        if let Some(prev) = self.ivars().input_wait_timer.replace(Some(timer)) {
+            prev.invalidate();
+        }
+        self.refresh_perm_labels();
+    }
+
+    fn start_accessibility_wait(&self) {
+        self.ivars().accessibility_waiting.set(true);
+        let timer = unsafe {
+            let target: &AnyObject = self;
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                10.0,
+                target,
+                sel!(accessibilityWaitTimeout:),
+                None,
+                false,
+            )
+        };
+        if let Some(prev) = self.ivars().accessibility_wait_timer.replace(Some(timer)) {
+            prev.invalidate();
+        }
+        self.refresh_perm_labels();
     }
 }
 
@@ -398,6 +511,7 @@ unsafe fn build_settings_window(
         controller,
         |labels| {
             let _ = controller.ivars().input_status_label.set(labels.status.clone());
+            let _ = controller.ivars().input_button.set(labels.button.clone());
         },
     );
     add_card(&stack, &input_card);
@@ -412,6 +526,7 @@ unsafe fn build_settings_window(
         controller,
         |labels| {
             let _ = controller.ivars().accessibility_status_label.set(labels.status.clone());
+            let _ = controller.ivars().accessibility_button.set(labels.button.clone());
         },
     );
     add_card(&stack, &acc_card);

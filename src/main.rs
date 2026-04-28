@@ -82,18 +82,27 @@ impl TapHandle {
         let mut slot = self.pending.lock().unwrap();
         let tx = match slot.take() {
             Some(t) => t,
-            None => return, // already installed
+            None => return, // already attempted
         };
         if !PermStatus::check().input_monitoring {
+            // Perm not granted yet; hold the sender so a later
+            // attempt (after the user grants) can install.
             *slot = Some(tx);
             return;
         }
-        if install_event_tap(tx.clone()) {
+        if install_event_tap(tx) {
             eprintln!("[hush] event tap installed");
         } else {
-            // Permission says granted but install failed (rare). Hold
-            // onto the sender for the next tick.
-            *slot = Some(tx);
+            // Preflight said granted but CGEventTapCreate failed —
+            // typically a TCC cdhash mismatch on ad-hoc dev builds.
+            // Do NOT retry: each CGEventTapCreate against an
+            // unauthorized cdhash re-fires the "Keystroke Receiving"
+            // TCC prompt, trapping the user in a prompt loop. Drop
+            // the sender; user can restart the app to retry.
+            eprintln!(
+                "[hush] event tap install failed despite granted perm; \
+                 quit and reopen Hush to retry"
+            );
         }
     }
 }

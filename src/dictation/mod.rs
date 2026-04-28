@@ -3,6 +3,7 @@
 //! adapters wired by the `Dictation` facade.
 
 pub mod cpal_capture;
+pub mod ollama;
 pub mod output;
 pub mod overlay_sink;
 pub mod parakeet;
@@ -19,7 +20,7 @@ use pipeline::{Pipeline, Transcriber};
 use crate::audio::Backend;
 use crate::overlay::OverlayState;
 use cpal_capture::CpalCapture;
-use output::ClipboardPasteOutput;
+use output::{ClipboardPasteOutput, PostProcessOutput};
 use overlay_sink::OverlayStatusSink;
 use parakeet::ParakeetTranscriber;
 use whisper::WhisperTranscriber;
@@ -52,7 +53,7 @@ impl Dictation {
             let capture = CpalCapture::new(move |rms| {
                 level_sink.publish(StatusEvent::LevelTick(rms));
             });
-            let output = ClipboardPasteOutput;
+            let output = PostProcessOutput::new(ClipboardPasteOutput);
             let pipeline = Pipeline::new(capture, transcriber, output, sink, MIN_SAMPLES);
             eprintln!("[hush] ready. hold fn to dictate.");
             pipeline.run(rx);

@@ -13,7 +13,8 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
     NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
     NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSStackView,
-    NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField,
+    NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField, NSTextView, NSPopUpButton,
+    NSScrollView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
@@ -42,6 +43,11 @@ pub struct ControllerIvars {
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
     backend_checkbox: OnceCell<Retained<NSButton>>,
+    post_process_checkbox: OnceCell<Retained<NSButton>>,
+    post_process_model_popup: OnceCell<Retained<NSPopUpButton>>,
+    post_process_prompt_text_view: OnceCell<Retained<NSTextView>>,
+    post_process_save_button: OnceCell<Retained<NSButton>>,
+    post_process_status_label: OnceCell<Retained<NSTextField>>,
     trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
     overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
     backend_switch_lock: OnceCell<Arc<Mutex<()>>>,
@@ -159,6 +165,66 @@ define_class!(
             }
             self.refresh_autostart();
         }
+
+        #[unsafe(method(togglePostProcess:))]
+        fn toggle_post_process(&self, sender: Option<&AnyObject>) {
+            let enabled = sender
+                .and_then(|s| s.downcast_ref::<NSButton>())
+                .map(|b| b.state() == NSControlStateValueOn)
+                .unwrap_or(false);
+            crate::prefs::set_post_process_enabled(enabled);
+            self.refresh_post_process();
+        }
+
+        #[unsafe(method(selectPostProcessModel:))]
+        fn select_post_process_model(&self, sender: Option<&AnyObject>) {
+            let selected = sender
+                .and_then(|s| s.downcast_ref::<NSPopUpButton>())
+                .and_then(|popup| popup.titleOfSelectedItem())
+                .map(|title| title.to_string())
+                .unwrap_or_default();
+            if !selected.is_empty() {
+                crate::prefs::set_post_process_model(&selected);
+            }
+            self.refresh_post_process();
+        }
+
+        #[unsafe(method(refreshPostProcessModels:))]
+        fn refresh_post_process_models_action(&self, _sender: Option<&AnyObject>) {
+            self.refresh_post_process_models();
+        }
+
+        #[unsafe(method(savePostProcessPrompt:))]
+        fn save_post_process_prompt_action(&self, _sender: Option<&AnyObject>) {
+            let Some(text_view) = self.ivars().post_process_prompt_text_view.get() else {
+                return;
+            };
+            let prompt = text_view.string().to_string();
+            crate::prefs::set_post_process_prompt(&prompt);
+            self.refresh_post_process_prompt_save_button();
+        }
+
+        #[unsafe(method(resetPostProcessPrompt:))]
+        fn reset_post_process_prompt_action(&self, _sender: Option<&AnyObject>) {
+            crate::prefs::reset_post_process_prompt();
+            self.refresh_post_process();
+        }
+
+        #[unsafe(method(textDidChange:))]
+        fn text_did_change(&self, note: Option<&NSNotification>) {
+            let changed_ptr = note
+                .and_then(|n| n.object())
+                .map(|obj| (&*obj) as *const AnyObject);
+            let prompt_ptr = self
+                .ivars()
+                .post_process_prompt_text_view
+                .get()
+                .map(|tv| (&**tv as &AnyObject) as *const AnyObject);
+            let is_prompt_editor = changed_ptr.is_some() && changed_ptr == prompt_ptr;
+            if is_prompt_editor {
+                self.refresh_post_process_prompt_save_button();
+            }
+        }
     }
 
     unsafe impl NSObjectProtocol for AppController {}
@@ -203,6 +269,84 @@ impl AppController {
                 NSControlStateValueOff
             });
         }
+    }
+
+    fn set_post_process_status(&self, message: &str, error: bool) {
+        if let Some(label) = self.ivars().post_process_status_label.get() {
+            let text = NSString::from_str(message);
+            label.setStringValue(&text);
+            let color = if error {
+                NSColor::systemRedColor()
+            } else {
+                NSColor::secondaryLabelColor()
+            };
+            label.setTextColor(Some(&color));
+        }
+    }
+
+    fn refresh_post_process(&self) {
+        let enabled = crate::prefs::get_post_process_enabled();
+        if let Some(checkbox) = self.ivars().post_process_checkbox.get() {
+            checkbox.setState(if enabled {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+        if let Some(popup) = self.ivars().post_process_model_popup.get() {
+            popup.setEnabled(enabled);
+        }
+        if let Some(text_view) = self.ivars().post_process_prompt_text_view.get() {
+            text_view.setEditable(enabled);
+            let prompt = NSString::from_str(&crate::prefs::get_post_process_prompt());
+            text_view.setString(&prompt);
+        }
+        self.refresh_post_process_prompt_save_button();
+    }
+
+    fn refresh_post_process_prompt_save_button(&self) {
+        let enabled = crate::prefs::get_post_process_enabled();
+        let dirty = self
+            .ivars()
+            .post_process_prompt_text_view
+            .get()
+            .map(|text_view| text_view.string().to_string() != crate::prefs::get_post_process_prompt())
+            .unwrap_or(false);
+        if let Some(save_button) = self.ivars().post_process_save_button.get() {
+            save_button.setEnabled(enabled && dirty);
+        }
+    }
+
+    fn refresh_post_process_models(&self) {
+        let models = match crate::dictation::ollama::fetch_models() {
+            Ok(models) => models,
+            Err(err) => {
+                self.set_post_process_status(&format!("Model refresh failed: {err}"), true);
+                return;
+            }
+        };
+        let Some(popup) = self.ivars().post_process_model_popup.get() else {
+            return;
+        };
+        popup.removeAllItems();
+        for model in &models {
+            let title = NSString::from_str(model);
+            popup.addItemWithTitle(&title);
+        }
+        if models.is_empty() {
+            self.set_post_process_status("No models returned from Ollama.", true);
+            return;
+        }
+        let current = crate::prefs::get_post_process_model();
+        let selected = if models.iter().any(|m| m == &current) {
+            current
+        } else {
+            models[0].clone()
+        };
+        let selected_title = NSString::from_str(&selected);
+        popup.selectItemWithTitle(&selected_title);
+        crate::prefs::set_post_process_model(&selected);
+        self.set_post_process_status("", false);
     }
 
     fn refresh_perm_labels(&self) {
@@ -320,6 +464,7 @@ pub fn install_menubar_and_window(
     unsafe {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        install_main_menu(mtm);
 
         // Status item
         let status_bar = NSStatusBar::systemStatusBar();
@@ -369,6 +514,15 @@ pub fn install_menubar_and_window(
             Some(ns_string!("NSApplicationDidBecomeActiveNotification")),
             None,
         );
+        if let Some(prompt_text_view) = controller.ivars().post_process_prompt_text_view.get() {
+            let prompt_text_view_obj: &AnyObject = prompt_text_view;
+            center.addObserver_selector_name_object(
+                observer,
+                sel!(textDidChange:),
+                Some(ns_string!("NSTextDidChangeNotification")),
+                Some(prompt_text_view_obj),
+            );
+        }
 
         // Belt-and-suspenders: poll perm state every 1.5s so the
         // settings UI updates even while the app is in the background.
@@ -395,7 +549,67 @@ pub fn install_menubar_and_window(
     controller.refresh_perm_labels();
     controller.refresh_autostart();
     controller.refresh_backend();
+    controller.refresh_post_process();
+    controller.refresh_post_process_models();
     UiHandles { controller }
+}
+
+unsafe fn install_main_menu(mtm: MainThreadMarker) {
+    let app = NSApplication::sharedApplication(mtm);
+    let main_menu = NSMenu::new(mtm);
+    let edit_root = NSMenuItem::new(mtm);
+    edit_root.setTitle(ns_string!("Edit"));
+    main_menu.addItem(&edit_root);
+
+    let edit_menu = NSMenu::new(mtm);
+    edit_menu.setTitle(ns_string!("Edit"));
+
+    let undo_item = NSMenuItem::new(mtm);
+    undo_item.setTitle(ns_string!("Undo"));
+    undo_item.setAction(Some(sel!(undo:)));
+    undo_item.setKeyEquivalent(ns_string!("z"));
+    undo_item.setTarget(None);
+    edit_menu.addItem(&undo_item);
+
+    let redo_item = NSMenuItem::new(mtm);
+    redo_item.setTitle(ns_string!("Redo"));
+    redo_item.setAction(Some(sel!(redo:)));
+    redo_item.setKeyEquivalent(ns_string!("Z"));
+    redo_item.setTarget(None);
+    edit_menu.addItem(&redo_item);
+
+    edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    let cut_item = NSMenuItem::new(mtm);
+    cut_item.setTitle(ns_string!("Cut"));
+    cut_item.setAction(Some(sel!(cut:)));
+    cut_item.setKeyEquivalent(ns_string!("x"));
+    cut_item.setTarget(None);
+    edit_menu.addItem(&cut_item);
+
+    let copy_item = NSMenuItem::new(mtm);
+    copy_item.setTitle(ns_string!("Copy"));
+    copy_item.setAction(Some(sel!(copy:)));
+    copy_item.setKeyEquivalent(ns_string!("c"));
+    copy_item.setTarget(None);
+    edit_menu.addItem(&copy_item);
+
+    let paste_item = NSMenuItem::new(mtm);
+    paste_item.setTitle(ns_string!("Paste"));
+    paste_item.setAction(Some(sel!(paste:)));
+    paste_item.setKeyEquivalent(ns_string!("v"));
+    paste_item.setTarget(None);
+    edit_menu.addItem(&paste_item);
+
+    let select_all_item = NSMenuItem::new(mtm);
+    select_all_item.setTitle(ns_string!("Select All"));
+    select_all_item.setAction(Some(sel!(selectAll:)));
+    select_all_item.setKeyEquivalent(ns_string!("a"));
+    select_all_item.setTarget(None);
+    edit_menu.addItem(&select_all_item);
+
+    edit_root.setSubmenu(Some(&edit_menu));
+    app.setMainMenu(Some(&main_menu));
 }
 
 unsafe fn menu_item(
@@ -508,6 +722,9 @@ unsafe fn build_settings_window(
 
     let backend_box = build_backend_card(mtm, controller);
     add_card(&stack, &backend_box);
+
+    let post_process_box = build_post_process_card(mtm, controller);
+    add_card(&stack, &post_process_box);
 
     let footer = make_label(
         mtm,
@@ -766,6 +983,192 @@ unsafe fn build_backend_card(
         .setActive(true);
 
     let _ = controller.ivars().backend_checkbox.set(checkbox);
+
+    box_view
+}
+
+unsafe fn build_post_process_card(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+) -> Retained<NSBox> {
+    let box_view = NSBox::new(mtm);
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setBorderType(objc2_app_kit::NSBorderType::LineBorder);
+    box_view.setBorderColor(&NSColor::separatorColor());
+    box_view.setCornerRadius(10.0);
+    box_view.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+    box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
+    box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let inner = NSStackView::new(mtm);
+    inner.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    inner.setSpacing(8.0);
+    inner.setAlignment(NSLayoutAttribute::Leading);
+    inner.setEdgeInsets(NSEdgeInsets {
+        top: 14.0,
+        left: 16.0,
+        bottom: 14.0,
+        right: 16.0,
+    });
+    inner.setDistribution(NSStackViewDistribution::Fill);
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let checkbox = NSButton::new(mtm);
+    checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    checkbox.setTitle(ns_string!("Enable Ollama post-processing"));
+    let target_obj: &AnyObject = controller;
+    checkbox.setTarget(Some(target_obj));
+    checkbox.setAction(Some(sel!(togglePostProcess:)));
+    inner.addArrangedSubview(&checkbox);
+
+    let row = NSStackView::new(mtm);
+    row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    row.setSpacing(8.0);
+    row.setDistribution(NSStackViewDistribution::Fill);
+    row.setAlignment(NSLayoutAttribute::CenterY);
+    row.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let popup = NSPopUpButton::new(mtm);
+    popup.setTarget(Some(target_obj));
+    popup.setAction(Some(sel!(selectPostProcessModel:)));
+    row.addArrangedSubview(&popup);
+
+    let refresh_button = NSButton::new(mtm);
+    refresh_button.setTitle(ns_string!("Refresh"));
+    refresh_button.setBezelStyle(NSBezelStyle::Rounded);
+    refresh_button.setControlSize(NSControlSize::Regular);
+    refresh_button.setTarget(Some(target_obj));
+    refresh_button.setAction(Some(sel!(refreshPostProcessModels:)));
+    row.addArrangedSubview(&refresh_button);
+
+    inner.addArrangedSubview(&row);
+
+    let desc = make_label(
+        mtm,
+        ns_string!(
+            "Uses Ollama at http://localhost:11434/v1. Select a model and refresh to reload available models."
+        ),
+        11.0,
+        false,
+    );
+    desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    desc.setUsesSingleLineMode(false);
+    desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&desc);
+
+    let prompt_desc = make_label(
+        mtm,
+        ns_string!(
+            "Prompt controls how the model rewrites dictation before paste. Use ${output} to choose where the original transcript is inserted in the prompt."
+        ),
+        11.0,
+        false,
+    );
+    prompt_desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    prompt_desc.setUsesSingleLineMode(false);
+    prompt_desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&prompt_desc);
+
+    let prompt_scroll = NSScrollView::new(mtm);
+    prompt_scroll.setHasVerticalScroller(true);
+    prompt_scroll.setHasHorizontalScroller(false);
+    prompt_scroll.setAutohidesScrollers(true);
+    prompt_scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let prompt_text_view = NSTextView::new(mtm);
+    prompt_text_view.setUsesFindBar(false);
+    prompt_text_view.setAllowsUndo(true);
+    prompt_text_view.setEditable(true);
+    prompt_text_view.setSelectable(true);
+    prompt_text_view.setVerticallyResizable(true);
+    prompt_text_view.setHorizontallyResizable(false);
+    let current_prompt = NSString::from_str(&crate::prefs::get_post_process_prompt());
+    prompt_text_view.setString(&current_prompt);
+    prompt_scroll.setDocumentView(Some(&prompt_text_view));
+    inner.addArrangedSubview(&prompt_scroll);
+
+    let prompt_buttons = NSStackView::new(mtm);
+    prompt_buttons.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    prompt_buttons.setSpacing(8.0);
+    prompt_buttons.setDistribution(NSStackViewDistribution::Fill);
+    prompt_buttons.setAlignment(NSLayoutAttribute::CenterY);
+    prompt_buttons.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let save_button = NSButton::new(mtm);
+    save_button.setTitle(ns_string!("Save"));
+    save_button.setBezelStyle(NSBezelStyle::Rounded);
+    save_button.setControlSize(NSControlSize::Regular);
+    save_button.setTarget(Some(target_obj));
+    save_button.setAction(Some(sel!(savePostProcessPrompt:)));
+    save_button.setEnabled(false);
+    prompt_buttons.addArrangedSubview(&save_button);
+
+    let reset_button = NSButton::new(mtm);
+    reset_button.setTitle(ns_string!("Reset"));
+    reset_button.setBezelStyle(NSBezelStyle::Rounded);
+    reset_button.setControlSize(NSControlSize::Regular);
+    reset_button.setTarget(Some(target_obj));
+    reset_button.setAction(Some(sel!(resetPostProcessPrompt:)));
+    prompt_buttons.addArrangedSubview(&reset_button);
+
+    inner.addArrangedSubview(&prompt_buttons);
+
+    let status = make_label(mtm, ns_string!(""), 11.0, false);
+    status.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    inner.addArrangedSubview(&status);
+
+    box_view.setContentView(Some(&inner));
+
+    let inner_view: &NSView = &inner;
+    let box_super: &NSView = &box_view;
+    pin_view_to_parent(inner_view, box_super);
+
+    let row_view: &NSView = &row;
+    row_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let desc_view: &NSView = &desc;
+    desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let prompt_desc_view: &NSView = &prompt_desc;
+    prompt_desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let prompt_scroll_view: &NSView = &prompt_scroll;
+    prompt_scroll_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let prompt_buttons_view: &NSView = &prompt_buttons;
+    prompt_buttons_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    // Keep long prompts to about 20 visible lines and use mouse-wheel scrolling.
+    let prompt_max_height = prompt_scroll
+        .heightAnchor()
+        .constraintLessThanOrEqualToConstant(320.0);
+    prompt_max_height.setActive(true);
+    let prompt_min_height = prompt_scroll.heightAnchor().constraintEqualToConstant(320.0);
+    prompt_min_height.setActive(true);
+
+    let _ = controller.ivars().post_process_checkbox.set(checkbox);
+    let _ = controller.ivars().post_process_model_popup.set(popup);
+    let _ = controller
+        .ivars()
+        .post_process_prompt_text_view
+        .set(prompt_text_view);
+    let _ = controller.ivars().post_process_save_button.set(save_button);
+    let _ = controller.ivars().post_process_status_label.set(status);
 
     box_view
 }

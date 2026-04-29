@@ -37,6 +37,12 @@ pub trait Transcriber: Send + Sync {
     fn transcribe(&self, pcm_16k: &[f32]) -> Result<String, String>;
 }
 
+impl<T: Transcriber + ?Sized> Transcriber for Box<T> {
+    fn transcribe(&self, pcm_16k: &[f32]) -> Result<String, String> {
+        (**self).transcribe(pcm_16k)
+    }
+}
+
 pub trait Output: Send + Sync {
     fn deliver(&self, text: &str) -> Result<(), String>;
 }

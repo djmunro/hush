@@ -2,22 +2,19 @@
 
 mod audio;
 mod autostart;
+mod config;
 mod dictation;
 mod icon;
 mod keyboard;
 mod overlay;
 mod perms;
 mod prefs;
+mod shortcut;
 mod ui;
 
-use std::cell::Cell;
-use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
 use objc2_foundation::MainThreadMarker;
 
 use dictation::{Dictation, Trigger};
@@ -25,50 +22,36 @@ use dictation::{Dictation, Trigger};
 fn main() {
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
 
+    let cfg = config::load();
+
     let overlay_state = overlay::OverlayState::new();
     let _overlay_ctrl = overlay::OverlayController::install(mtm, overlay_state.clone());
 
-    let (tx, rx) = mpsc::channel::<Trigger>();
-    Dictation::production(audio::ensure_model(), overlay_state.clone()).start_processing(rx);
-    let trigger_hub = Arc::new(Mutex::new(tx));
+    // Two channels with a relay so the backend can be swapped live: the
+    // shortcut monitor sends into `front_tx`; the relay forwards to whichever
+    // pipeline sender is currently in `hub`. Replacing the hub's inner sender
+    // drops the old one, which signals the previous pipeline thread to exit.
+    let (front_tx, front_rx) = mpsc::channel::<Trigger>();
+    let (pipeline_tx, pipeline_rx) = mpsc::channel::<Trigger>();
+    Dictation::production(audio::ensure_model(), overlay_state.clone())
+        .start_processing(pipeline_rx);
+    let hub = Arc::new(Mutex::new(pipeline_tx));
+    let hub_for_relay = hub.clone();
+    std::thread::spawn(move || {
+        while let Ok(t) = front_rx.recv() {
+            let _ = hub_for_relay.lock().unwrap().send(t);
+        }
+    });
 
-    // Install the global fn-key monitor. NSEvent.addGlobalMonitor needs
-    // only Accessibility (no separate Input Monitoring perm — this is
-    // the same approach Wispr Flow uses). The monitor is registered
-    // here and silently no-ops until Accessibility is granted; after
-    // that, events flow without any reinstall.
-    let monitor = install_fn_monitor(trigger_hub.clone());
-    if let Some(m) = monitor {
-        // The OS retains the monitor; leak our handle so the block
-        // never drops while the app is alive.
-        std::mem::forget(m);
-    }
+    // Install the global shortcut monitor. NSEvent.addGlobalMonitor needs
+    // only Accessibility (no separate Input Monitoring perm). It silently
+    // no-ops until Accessibility is granted; after that, events flow
+    // without any reinstall.
+    let monitor = shortcut::ShortcutMonitor::install(cfg.shortcut.clone(), front_tx);
 
-    let ui_handles = ui::install_menubar_and_window(mtm, trigger_hub, overlay_state.clone());
+    let ui_handles =
+        ui::install_menubar_and_window(mtm, cfg.shortcut, monitor, hub, overlay_state);
     ui::maybe_show_settings_at_launch(&ui_handles.controller);
 
     ui::run_app(mtm);
-}
-
-fn install_fn_monitor(hub: Arc<Mutex<mpsc::Sender<Trigger>>>) -> Option<Retained<AnyObject>> {
-    // Edge-detect fn press / release. Block fires on the main thread,
-    // so a Cell suffices for the prev-state.
-    let fn_down = Cell::new(false);
-    let handler = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
-        let event = unsafe { event_ptr.as_ref() };
-        let pressed = event
-            .modifierFlags()
-            .contains(NSEventModifierFlags::Function);
-        if pressed && !fn_down.get() {
-            fn_down.set(true);
-            let _ = hub.lock().unwrap().send(Trigger::Start);
-        } else if !pressed && fn_down.get() {
-            fn_down.set(false);
-            let _ = hub.lock().unwrap().send(Trigger::Stop);
-        }
-    });
-    NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-        NSEventMask::FlagsChanged,
-        &handler,
-    )
 }

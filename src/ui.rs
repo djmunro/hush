@@ -21,8 +21,10 @@ use objc2_foundation::{
 };
 
 use crate::autostart;
+use crate::config::{self, Shortcut};
 use crate::icon;
 use crate::perms::{self, MicState, PermStatus};
+use crate::shortcut::ShortcutMonitor;
 
 const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 
@@ -40,6 +42,11 @@ pub struct ControllerIvars {
     accessibility_waiting: Cell<bool>,
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
+    shortcut_label: OnceCell<Retained<NSTextField>>,
+    shortcut_button: OnceCell<Retained<NSButton>>,
+    shortcut_recording: Cell<bool>,
+    shortcut: RefCell<Option<Shortcut>>,
+    monitor: RefCell<Option<ShortcutMonitor>>,
 }
 
 define_class!(
@@ -114,6 +121,11 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: Option<&AnyObject>) {
             self.refresh_perm_labels();
+        }
+
+        #[unsafe(method(recordShortcut:))]
+        fn record_shortcut(&self, _sender: Option<&AnyObject>) {
+            self.start_shortcut_recording();
         }
 
         #[unsafe(method(toggleAutostart:))]
@@ -227,6 +239,77 @@ impl AppController {
         button.setEnabled(!granted && !waiting);
     }
 
+    fn refresh_shortcut_label(&self) {
+        let cur = self
+            .ivars()
+            .shortcut
+            .borrow()
+            .as_ref()
+            .map(|s| s.pretty())
+            .unwrap_or_else(|| "(none)".to_string());
+        if let Some(label) = self.ivars().shortcut_label.get() {
+            let s = NSString::from_str(&cur);
+            label.setStringValue(&s);
+        }
+        if let Some(button) = self.ivars().shortcut_button.get() {
+            let recording = self.ivars().shortcut_recording.get();
+            button.setTitle(if recording {
+                ns_string!("Press shortcut…")
+            } else {
+                ns_string!("Record…")
+            });
+            button.setEnabled(!recording);
+        }
+    }
+
+    fn start_shortcut_recording(&self) {
+        self.ivars().shortcut_recording.set(true);
+        self.refresh_shortcut_label();
+
+        // Hand a raw pointer to the callback. The AppController is owned
+        // by the menubar / settings window for the lifetime of the
+        // process, so this address stays valid.
+        let weak: usize = (self as *const AppController) as usize;
+
+        if let Some(monitor) = self.ivars().monitor.borrow().as_ref() {
+            monitor.start_recording(move |captured| {
+                let ptr = weak as *const AppController;
+                if ptr.is_null() {
+                    return;
+                }
+                unsafe {
+                    let controller: &AppController = &*ptr;
+                    controller.finish_shortcut_recording(captured);
+                }
+            });
+        } else {
+            self.ivars().shortcut_recording.set(false);
+            self.refresh_shortcut_label();
+        }
+    }
+
+    fn finish_shortcut_recording(&self, captured: Option<Shortcut>) {
+        self.ivars().shortcut_recording.set(false);
+
+        if let Some(sc) = captured {
+            *self.ivars().shortcut.borrow_mut() = Some(sc.clone());
+            if let Some(monitor) = self.ivars().monitor.borrow().as_ref() {
+                monitor.set_binding(sc.clone());
+            }
+            let cfg = config::Config { shortcut: sc };
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] save config: {e}");
+            }
+        }
+        // Cancelled (Esc): leave existing binding untouched, just refresh UI.
+        self.refresh_shortcut_label();
+    }
+
+    pub fn set_initial_shortcut(&self, sc: Shortcut, monitor: Option<ShortcutMonitor>) {
+        *self.ivars().shortcut.borrow_mut() = Some(sc);
+        *self.ivars().monitor.borrow_mut() = monitor;
+    }
+
     fn start_accessibility_wait(&self) {
         self.ivars().accessibility_waiting.set(true);
         let timer = unsafe {
@@ -272,8 +355,13 @@ pub struct UiHandles {
     pub controller: Retained<AppController>,
 }
 
-pub fn install_menubar_and_window(mtm: MainThreadMarker) -> UiHandles {
+pub fn install_menubar_and_window(
+    mtm: MainThreadMarker,
+    initial_shortcut: Shortcut,
+    monitor: Option<ShortcutMonitor>,
+) -> UiHandles {
     let controller = AppController::new(mtm);
+    controller.set_initial_shortcut(initial_shortcut, monitor);
 
     unsafe {
         let app = NSApplication::sharedApplication(mtm);
@@ -352,6 +440,7 @@ pub fn install_menubar_and_window(mtm: MainThreadMarker) -> UiHandles {
 
     controller.refresh_perm_labels();
     controller.refresh_autostart();
+    controller.refresh_shortcut_label();
     UiHandles { controller }
 }
 
@@ -378,7 +467,7 @@ unsafe fn build_settings_window(
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable;
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 540.0));
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 680.0));
 
     let window: Retained<NSWindow> = NSWindow::initWithContentRect_styleMask_backing_defer(
         NSWindow::alloc(mtm),
@@ -411,12 +500,18 @@ unsafe fn build_settings_window(
 
     let subtitle = make_label(
         mtm,
-        ns_string!("Hold the fn key, speak, release to paste."),
+        ns_string!("Hold your shortcut, speak, release to paste."),
         12.0,
         false,
     );
     subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
     stack.addArrangedSubview(&subtitle);
+
+    let shortcut_heading = make_label(mtm, ns_string!("Shortcut"), 14.0, true);
+    stack.addArrangedSubview(&shortcut_heading);
+
+    let shortcut_card = build_shortcut_card(mtm, controller);
+    add_card(&stack, &shortcut_card);
 
     let perms_heading = make_label(mtm, ns_string!("Permissions"), 14.0, true);
     stack.addArrangedSubview(&perms_heading);
@@ -442,7 +537,7 @@ unsafe fn build_settings_window(
     let acc_card = build_card(
         mtm,
         ns_string!("Accessibility"),
-        ns_string!("Lets hush detect the fn key globally and paste the transcript by sending Cmd+V to the focused app."),
+        ns_string!("Lets hush detect your push-to-talk shortcut globally and paste the transcript by sending Cmd+V to the focused app."),
         ns_string!("Open Accessibility…"),
         sel!(grantAccessibility:),
         controller,
@@ -593,6 +688,94 @@ unsafe fn build_card(
         button,
     };
     register(&labels);
+
+    box_view
+}
+
+unsafe fn build_shortcut_card(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+) -> Retained<NSBox> {
+    let box_view = NSBox::new(mtm);
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setBorderType(objc2_app_kit::NSBorderType::LineBorder);
+    box_view.setBorderColor(&NSColor::separatorColor());
+    box_view.setCornerRadius(10.0);
+    box_view.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+    box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
+    box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let inner = NSStackView::new(mtm);
+    inner.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    inner.setSpacing(8.0);
+    inner.setAlignment(NSLayoutAttribute::Leading);
+    inner.setEdgeInsets(NSEdgeInsets {
+        top: 14.0,
+        left: 16.0,
+        bottom: 14.0,
+        right: 16.0,
+    });
+    inner.setDistribution(NSStackViewDistribution::Fill);
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let header = NSStackView::new(mtm);
+    header.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    header.setSpacing(8.0);
+    header.setDistribution(NSStackViewDistribution::Fill);
+    header.setAlignment(NSLayoutAttribute::CenterY);
+    header.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let title_label = make_label(mtm, ns_string!("Push-to-talk"), 14.0, true);
+    let spacer = NSView::new(mtm);
+    spacer.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let value_label = make_label(mtm, ns_string!("…"), 13.0, true);
+
+    header.addArrangedSubview(&title_label);
+    header.addArrangedSubview(&spacer);
+    header.addArrangedSubview(&value_label);
+
+    inner.addArrangedSubview(&header);
+
+    let desc = make_label(
+        mtm,
+        ns_string!("Hold this combo to dictate. Click \"Record…\" then press the keys you want — modifiers (incl. left/right side) and one optional non-modifier key. Press Esc to cancel."),
+        11.0,
+        false,
+    );
+    desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    desc.setUsesSingleLineMode(false);
+    desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&desc);
+
+    let button = NSButton::new(mtm);
+    button.setTitle(ns_string!("Record…"));
+    button.setBezelStyle(NSBezelStyle::Rounded);
+    button.setControlSize(NSControlSize::Regular);
+    let target_obj: &AnyObject = controller;
+    button.setTarget(Some(target_obj));
+    button.setAction(Some(sel!(recordShortcut:)));
+    inner.addArrangedSubview(&button);
+
+    box_view.setContentView(Some(&inner));
+
+    let inner_view: &NSView = &inner;
+    let box_super: &NSView = &box_view;
+    pin_view_to_parent(inner_view, box_super);
+
+    let header_view: &NSView = &header;
+    header_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let desc_view: &NSView = &desc;
+    desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let _ = controller.ivars().shortcut_label.set(value_label);
+    let _ = controller.ivars().shortcut_button.set(button);
 
     box_view
 }

@@ -25,8 +25,7 @@ impl<O: Output> Output for PostProcessOutput<O> {
     fn deliver(&self, text: &str) -> Result<(), String> {
         let final_text = if prefs::get_post_process_enabled() {
             let model = prefs::get_post_process_model();
-            let prompt = prefs::get_post_process_prompt();
-            match ollama::post_process(&model, &prompt, text) {
+            match ollama::post_process(&model, text) {
                 Ok(refined) => refined,
                 Err(err) => {
                     eprintln!("[hush] post-process failed ({model}): {err}");

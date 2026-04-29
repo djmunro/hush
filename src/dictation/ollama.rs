@@ -1,9 +1,13 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const OLLAMA_V1_BASE_URL: &str = "http://localhost:11434/v1";
 const OLLAMA_MODELS_PATH: &str = "/models";
-const OLLAMA_GENERATE_URL: &str = "http://localhost:11434/api/generate";
-const SYSTEM_PROMPT: &str = "You are a transcription post-processor. Rewrite the provided transcript text only. Do not answer questions, do not add new information, and do not acknowledge or respond conversationally.";
+const OLLAMA_CHAT_URL: &str = "http://localhost:11434/api/chat";
+
+// API-side constraint only. Editing conventions live in the Modelfile (model-files/transcribe-editor-dev.md).
+const POST_PROCESS_SYSTEM: &str = r#"Apply the editing conventions configured for this model to each user message. Each message is raw speech-to-text transcript, not a chat turn.
+
+Return only the edited transcript. Do not reply as a conversational assistant: no greetings, offers of help, preambles, or explanations."#;
 
 #[derive(Deserialize)]
 struct ModelsResponse {
@@ -15,24 +19,33 @@ struct ModelEntry {
     id: String,
 }
 
-#[derive(serde::Serialize)]
-struct GenerateRequest<'a> {
+#[derive(Serialize)]
+struct ChatRequest<'a> {
     model: &'a str,
-    system: &'a str,
-    prompt: String,
-    raw: bool,
+    messages: Vec<ChatMessage>,
     stream: bool,
     options: GenerateOptions,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
+struct ChatMessage {
+    role: &'static str,
+    content: String,
+}
+
+#[derive(Serialize)]
 struct GenerateOptions {
     temperature: f32,
 }
 
 #[derive(Deserialize)]
-struct GenerateResponse {
-    response: String,
+struct ChatResponse {
+    message: ChatMessageOut,
+}
+
+#[derive(Deserialize)]
+struct ChatMessageOut {
+    content: String,
 }
 
 pub fn fetch_models() -> Result<Vec<String>, String> {
@@ -47,71 +60,30 @@ pub fn fetch_models() -> Result<Vec<String>, String> {
     Ok(models)
 }
 
-pub fn post_process(model: &str, prompt_template: &str, text: &str) -> Result<String, String> {
-    let transformed_prompt = if prompt_template.contains("${output}") {
-        prompt_template.replace("${output}", text)
-    } else {
-        format!("{prompt_template}\n\nInput:\n{text}")
-    };
-    let prompt = format!(
-        "<CONTRACT>\n\
-You must transform text only.\n\
-Return output text only.\n\
-No preamble, no explanation, no labels.\n\
-Do not answer the user as a chatbot.\n\
-Do not add facts not present in input.\n\
-Do not add terminal punctuation at the end of lines.\n\
-If input starts lowercase, do not force-capitalize the first letter.\n\
-</CONTRACT>\n\
-<USER_RULES>\n\
-{transformed_prompt}\n\
-</USER_RULES>\n\
-<INPUT>\n\
-{text}\n\
-</INPUT>\n\
-<OUTPUT>\n"
-    );
-    let request = GenerateRequest {
+pub fn post_process(model: &str, text: &str) -> Result<String, String> {
+    let request = ChatRequest {
         model,
-        system: SYSTEM_PROMPT,
-        prompt,
-        raw: true,
+        messages: vec![
+            ChatMessage {
+                role: "system",
+                content: POST_PROCESS_SYSTEM.to_string(),
+            },
+            ChatMessage {
+                role: "user",
+                content: text.to_string(),
+            },
+        ],
         stream: false,
         options: GenerateOptions { temperature: 0.0 },
     };
-    let response: GenerateResponse = ureq::post(OLLAMA_GENERATE_URL)
+    let response: ChatResponse = ureq::post(OLLAMA_CHAT_URL)
         .send_json(request)
         .map_err(|e| format!("post-process request failed: {e}"))?
         .into_json()
         .map_err(|e| format!("post-process parse failed: {e}"))?;
-    let output = normalize_output(text, &response.response);
+    let output = response.message.content.trim().to_string();
     if output.is_empty() {
         return Err("post-process response was empty".to_string());
     }
     Ok(output)
-}
-
-fn normalize_output(input: &str, raw_output: &str) -> String {
-    let mut out_lines = Vec::new();
-    for line in raw_output.lines() {
-        let stripped = line
-            .trim_end()
-            .trim_end_matches(['.', '!', '?'])
-            .to_string();
-        out_lines.push(stripped);
-    }
-    let mut output = out_lines.join("\n").trim().to_string();
-    let input_starts_lower = input
-        .chars()
-        .find(|c| c.is_ascii_alphabetic())
-        .map(|c| c.is_ascii_lowercase())
-        .unwrap_or(false);
-    if input_starts_lower {
-        let mut chars = output.chars().collect::<Vec<char>>();
-        if let Some(idx) = chars.iter().position(|c| c.is_ascii_alphabetic()) {
-            chars[idx] = chars[idx].to_ascii_lowercase();
-            output = chars.into_iter().collect();
-        }
-    }
-    output
 }

@@ -28,6 +28,9 @@ use crate::shortcut::ShortcutMonitor;
 
 const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const GIT_HASH: &str = env!("HUSH_GIT_HASH");
+
 #[derive(Default)]
 pub struct ControllerIvars {
     status_item: OnceCell<Retained<NSStatusItem>>,
@@ -375,6 +378,13 @@ pub fn install_menubar_and_window(
         }
 
         let menu = NSMenu::new(mtm);
+        let version_item = NSMenuItem::new(mtm);
+        version_item.setTitle(&NSString::from_str(&format!(
+            "Hush {VERSION} ({GIT_HASH})"
+        )));
+        version_item.setEnabled(false);
+        menu.addItem(&version_item);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&menu_item(
             mtm,
             ns_string!("Settings…"),

@@ -220,3 +220,18 @@ process — there's no graphics environment to attach to. We use
 | `scripts/build-app.sh` | cargo build → `target/release/Hush.app` (Info.plist, .icns, ad-hoc sign — no hardened runtime) |
 | `scripts/install-dev.sh` | build-app.sh → kill running → tccutil reset → swap `/Applications/Hush.app` → open |
 | `scripts/package.sh` | build-app.sh → `dist/Hush-X.Y.Z.dmg` (with /Applications symlink) + `dist/Hush-X.Y.Z.zip` (via `ditto` to preserve resource forks) |
+
+## Versioning
+
+`Cargo.toml`'s `version` field is the canonical source. `build.rs` runs
+`git rev-parse --short HEAD` and exposes the result as the
+`HUSH_GIT_HASH` env var. `src/ui.rs` reads both via `env!` and surfaces
+them as a disabled menu item at the top of the menubar dropdown:
+`Hush 0.2.0 (abc1234)`.
+
+The git tag (e.g. `v0.2.0`) is just `v` + `Cargo.toml.version`. The
+release CI workflow (`.github/workflows/release.yml`) verifies they
+match before building — drift fails the release.
+
+Full release pipeline (tag → build → GitHub Release → Homebrew cask
+bump) documented in `docs/release.md`.

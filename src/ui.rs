@@ -12,10 +12,10 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
     NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
-    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSStackView,
+    NSFont, NSLayoutAttribute, NSLayoutConstraintOrientation, NSLayoutPriorityDefaultLow,
+    NSLayoutPriorityFittingSizeCompression, NSLineBreakMode, NSMenu, NSMenuItem, NSStackView,
     NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField, NSTextView, NSPopUpButton,
-    NSScrollView,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSScrollView, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -1074,6 +1074,14 @@ unsafe fn build_post_process_card(
     prompt_scroll.setHasHorizontalScroller(false);
     prompt_scroll.setAutohidesScrollers(true);
     prompt_scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+    prompt_scroll.setContentHuggingPriority_forOrientation(
+        NSLayoutPriorityDefaultLow,
+        NSLayoutConstraintOrientation::Vertical,
+    );
+    prompt_scroll.setContentCompressionResistancePriority_forOrientation(
+        NSLayoutPriorityFittingSizeCompression,
+        NSLayoutConstraintOrientation::Vertical,
+    );
 
     let prompt_text_view = NSTextView::new(mtm);
     prompt_text_view.setUsesFindBar(false);
@@ -1153,13 +1161,11 @@ unsafe fn build_post_process_card(
         .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
         .setActive(true);
 
-    // Keep long prompts to about 20 visible lines and use mouse-wheel scrolling.
-    let prompt_max_height = prompt_scroll
+    const PROMPT_BOX_HEIGHT: CGFloat = 5.0 * 16.0;
+    prompt_scroll
         .heightAnchor()
-        .constraintLessThanOrEqualToConstant(320.0);
-    prompt_max_height.setActive(true);
-    let prompt_min_height = prompt_scroll.heightAnchor().constraintEqualToConstant(320.0);
-    prompt_min_height.setActive(true);
+        .constraintEqualToConstant(PROMPT_BOX_HEIGHT)
+        .setActive(true);
 
     let _ = controller.ivars().post_process_checkbox.set(checkbox);
     let _ = controller.ivars().post_process_model_popup.set(popup);

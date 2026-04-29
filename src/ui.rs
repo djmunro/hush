@@ -23,7 +23,7 @@ use objc2_foundation::{
 };
 
 use crate::autostart;
-use crate::config::{self, Shortcut};
+use crate::config::{self, BackendKind, Shortcut};
 use crate::dictation::{Dictation, Trigger};
 use crate::icon;
 use crate::overlay::OverlayState;
@@ -137,7 +137,16 @@ define_class!(
                 .and_then(|s| s.downcast_ref::<NSButton>())
                 .map(|b| b.state() == NSControlStateValueOn)
                 .unwrap_or(false);
-            crate::prefs::set_backend(if want_parakeet { "parakeet" } else { "whisper" });
+            let kind = if want_parakeet {
+                BackendKind::Parakeet
+            } else {
+                BackendKind::Whisper
+            };
+            let mut cfg = config::load();
+            cfg.backend = kind;
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] failed to save backend pref: {e}");
+            }
 
             let Some(hub) = self.ivars().trigger_hub.get().cloned() else { return };
             let Some(overlay) = self.ivars().overlay_state.get().cloned() else { return };
@@ -145,9 +154,8 @@ define_class!(
 
             std::thread::spawn(move || {
                 let _guard = switch_lock.lock().unwrap();
-                let backend = crate::audio::ensure_backend_model(want_parakeet);
                 let (new_tx, new_rx) = std::sync::mpsc::channel();
-                Dictation::production(backend, overlay).start_processing(new_rx);
+                Dictation::production(kind, overlay).start_processing(new_rx);
                 // Dropping the old sender signals the old pipeline thread to exit.
                 *hub.lock().unwrap() = new_tx;
             });
@@ -199,7 +207,7 @@ impl AppController {
     }
 
     fn refresh_backend(&self) {
-        let using_parakeet = crate::prefs::get_backend() == "parakeet";
+        let using_parakeet = config::load().backend == BackendKind::Parakeet;
         if let Some(checkbox) = self.ivars().backend_checkbox.get() {
             checkbox.setState(if using_parakeet {
                 NSControlStateValueOn
@@ -337,7 +345,8 @@ impl AppController {
             if let Some(monitor) = self.ivars().monitor.borrow().as_ref() {
                 monitor.set_binding(sc.clone());
             }
-            let cfg = config::Config { shortcut: sc };
+            let mut cfg = config::load();
+            cfg.shortcut = sc;
             if let Err(e) = config::save(&cfg) {
                 eprintln!("[hush] save config: {e}");
             }

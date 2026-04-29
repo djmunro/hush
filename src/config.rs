@@ -143,20 +143,46 @@ impl Shortcut {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Whisper,
+    Parakeet,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendKind::Whisper => "whisper",
+            BackendKind::Parakeet => "parakeet",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "whisper" => Some(BackendKind::Whisper),
+            "parakeet" => Some(BackendKind::Parakeet),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ConfigFile {
     shortcut: Option<String>,
+    backend: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub shortcut: Shortcut,
+    pub backend: BackendKind,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             shortcut: Shortcut::fn_only(),
+            backend: BackendKind::Parakeet,
         }
     }
 }
@@ -185,7 +211,13 @@ pub fn load() -> Config {
         .as_deref()
         .and_then(Shortcut::from_token)
         .unwrap_or_else(Shortcut::fn_only);
-    Config { shortcut }
+    let backend = std::env::var("HUSH_BACKEND")
+        .ok()
+        .as_deref()
+        .and_then(BackendKind::parse)
+        .or_else(|| parsed.backend.as_deref().and_then(BackendKind::parse))
+        .unwrap_or(BackendKind::Parakeet);
+    Config { shortcut, backend }
 }
 
 pub fn save(cfg: &Config) -> Result<(), String> {
@@ -193,6 +225,7 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
     let body = ConfigFile {
         shortcut: Some(cfg.shortcut.to_token()),
+        backend: Some(cfg.backend.as_str().to_string()),
     };
     let text = toml::to_string_pretty(&body).map_err(|e| e.to_string())?;
     fs::write(config_path(), text).map_err(|e| e.to_string())

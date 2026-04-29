@@ -8,7 +8,6 @@ mod icon;
 mod keyboard;
 mod overlay;
 mod perms;
-mod prefs;
 mod shortcut;
 mod ui;
 
@@ -33,8 +32,7 @@ fn main() {
     // drops the old one, which signals the previous pipeline thread to exit.
     let (front_tx, front_rx) = mpsc::channel::<Trigger>();
     let (pipeline_tx, pipeline_rx) = mpsc::channel::<Trigger>();
-    Dictation::production(audio::ensure_model(), overlay_state.clone())
-        .start_processing(pipeline_rx);
+    Dictation::production(cfg.backend, overlay_state.clone()).start_processing(pipeline_rx);
     let hub = Arc::new(Mutex::new(pipeline_tx));
     let hub_for_relay = hub.clone();
     std::thread::spawn(move || {

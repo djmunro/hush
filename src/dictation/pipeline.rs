@@ -16,6 +16,7 @@ pub enum StatusEvent {
     LevelTick(f32),
     Stopped,
     Transcribing,
+    PostProcessing,
     Idle,
     Error(String),
 }
@@ -107,12 +108,18 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
                         return Err(PipelineError::Transcribe(e));
                     }
                 };
-                self.sink.publish(StatusEvent::Idle);
-                if !text.is_empty() {
-                    self.output
-                        .deliver(&text)
-                        .map_err(PipelineError::Output)?;
+                if text.is_empty() {
+                    self.sink.publish(StatusEvent::Idle);
+                    return Ok(());
                 }
+                if crate::prefs::get_post_process_enabled()
+                    && crate::dictation::ollama::qualifies_for_post_process(&text)
+                {
+                    self.sink.publish(StatusEvent::PostProcessing);
+                }
+                let out = self.output.deliver(&text);
+                self.sink.publish(StatusEvent::Idle);
+                out.map_err(PipelineError::Output)?;
                 Ok(())
             }
         }

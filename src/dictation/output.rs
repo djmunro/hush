@@ -23,7 +23,9 @@ impl<O> PostProcessOutput<O> {
 
 impl<O: Output> Output for PostProcessOutput<O> {
     fn deliver(&self, text: &str) -> Result<(), String> {
-        let final_text = if prefs::get_post_process_enabled() {
+        let final_text = if prefs::get_post_process_enabled()
+            && ollama::qualifies_for_post_process(text)
+        {
             let model = prefs::get_post_process_model();
             match ollama::post_process(&model, text) {
                 Ok(refined) => refined,

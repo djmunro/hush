@@ -5,6 +5,7 @@
 //! - Recording — live audio-level bars driven by a ring buffer of recent
 //!   RMS values that the audio worker writes
 //! - Transcribing — animated dots while whisper does its thing
+//! - PostProcessing — rotating arc while the post-process model runs
 //!
 //! Driven by an NSTimer firing at ~30Hz. The timer reads the shared
 //! state and triggers a redraw / show / hide as needed. Audio thread
@@ -38,6 +39,7 @@ pub enum OverlayMode {
     Hidden,
     Recording,
     Transcribing,
+    PostProcessing,
 }
 
 pub struct OverlayState {
@@ -125,6 +127,7 @@ impl OverlayView {
         match mode {
             OverlayMode::Recording => draw_bars(bounds, &levels),
             OverlayMode::Transcribing => draw_dots(bounds, phase),
+            OverlayMode::PostProcessing => draw_spinner(bounds, phase),
             OverlayMode::Hidden => {} // window will be ordered out
         }
     }
@@ -175,6 +178,24 @@ unsafe fn draw_dots(bounds: NSRect, phase: u32) {
         let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(dot_d, dot_d));
         NSBezierPath::bezierPathWithOvalInRect(rect).fill();
     }
+}
+
+unsafe fn draw_spinner(bounds: NSRect, phase: u32) {
+    NSColor::whiteColor().setStroke();
+    let cx = bounds.size.width / 2.0;
+    let cy = bounds.size.height / 2.0;
+    let r: CGFloat = 11.0;
+    let rot = ((phase as f32 * 10.0) % 360.0) as CGFloat;
+    let path = NSBezierPath::bezierPath();
+    path.setLineWidth(2.5);
+    path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+        NSPoint::new(cx, cy),
+        r,
+        rot,
+        rot + 270.0,
+        false,
+    );
+    path.stroke();
 }
 
 #[derive(Default)]
@@ -274,7 +295,7 @@ impl OverlayController {
                     panel.orderOut(None);
                 }
             }
-            OverlayMode::Recording | OverlayMode::Transcribing => {
+            OverlayMode::Recording | OverlayMode::Transcribing | OverlayMode::PostProcessing => {
                 if !panel.isVisible() {
                     if let Some(mtm) = MainThreadMarker::new() {
                         position_panel(panel, mtm);

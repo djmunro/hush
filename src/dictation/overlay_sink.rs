@@ -34,6 +34,9 @@ impl StatusSink for OverlayStatusSink {
             StatusEvent::Transcribing => {
                 OverlayState::set_mode(&self.state, OverlayMode::Transcribing);
             }
+            StatusEvent::PostProcessing => {
+                OverlayState::set_mode(&self.state, OverlayMode::PostProcessing);
+            }
             StatusEvent::Idle => {
                 OverlayState::set_mode(&self.state, OverlayMode::Hidden);
             }

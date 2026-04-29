@@ -37,6 +37,9 @@ pub fn set_backend(backend: &str) {
 }
 
 pub fn get_post_process_enabled() -> bool {
+    if cfg!(test) {
+        return false;
+    }
     std::fs::read_to_string(post_process_enabled_path())
         .map(|s| s.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false)

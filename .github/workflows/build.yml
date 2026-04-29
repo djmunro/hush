@@ -1,0 +1,31 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # build.rs needs git history
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: bash scripts/package.sh
+        run: bash scripts/package.sh
+
+      - name: artifacts present
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          ls -lh "dist/Hush-${VERSION}.dmg" "dist/Hush-${VERSION}.zip"

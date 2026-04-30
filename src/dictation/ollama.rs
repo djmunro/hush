@@ -24,6 +24,13 @@ fn assistant_prefill_seed(text: &str) -> Option<String> {
     (!seed.is_empty()).then_some(seed)
 }
 
+fn strip_qwen_thinking_leaks(s: &str) -> String {
+    s.replace("<think>", "")
+        .replace("</think>", "")
+        .trim()
+        .to_string()
+}
+
 #[derive(Deserialize)]
 struct ModelsResponse {
     data: Vec<ModelEntry>,
@@ -39,6 +46,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
     options: GenerateOptions,
 }
 
@@ -96,6 +105,7 @@ pub fn post_process(model: &str, text: &str) -> Result<String, String> {
         model,
         messages,
         stream: false,
+        think: Some(false),
         options: GenerateOptions { temperature: 0.0 },
     };
     let response: ChatResponse = ureq::post(OLLAMA_CHAT_URL)
@@ -103,7 +113,7 @@ pub fn post_process(model: &str, text: &str) -> Result<String, String> {
         .map_err(|e| format!("post-process request failed: {e}"))?
         .into_json()
         .map_err(|e| format!("post-process parse failed: {e}"))?;
-    let output = response.message.content.trim().to_string();
+    let output = strip_qwen_thinking_leaks(&response.message.content);
     if output.is_empty() {
         return Err("post-process response was empty".to_string());
     }
@@ -125,6 +135,16 @@ mod tests {
         assert!(qualifies_for_post_process(
             "short words no third space yet"
         ));
+    }
+
+    #[test]
+    fn strip_qwen_thinking_leaks_removes_tags() {
+        assert_eq!(
+            super::strip_qwen_thinking_leaks(
+                "</think>\n\nHello, is this thing on? Testing."
+            ),
+            "Hello, is this thing on? Testing."
+        );
     }
 
     #[test]

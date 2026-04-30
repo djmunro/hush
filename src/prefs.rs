@@ -6,6 +6,7 @@ fn prefs_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME unset")).join(".cache/hush")
 }
 
+#[allow(dead_code)]
 fn backend_path() -> PathBuf {
     prefs_dir().join("backend")
 }
@@ -19,6 +20,7 @@ fn post_process_model_path() -> PathBuf {
 }
 
 /// Returns the active backend name. Env var HUSH_BACKEND takes priority.
+#[allow(dead_code)]
 pub fn get_backend() -> String {
     if let Ok(v) = std::env::var("HUSH_BACKEND") {
         return v;
@@ -28,6 +30,7 @@ pub fn get_backend() -> String {
         .unwrap_or_else(|_| "whisper".to_string())
 }
 
+#[allow(dead_code)]
 pub fn set_backend(backend: &str) {
     let path = backend_path();
     if let Some(parent) = path.parent() {

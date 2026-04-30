@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::BackendKind;
+
 const DEFAULT_WHISPER_MODEL: &str = "large-v3-turbo";
 const WHISPER_URL_PREFIX: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-";
@@ -18,26 +20,16 @@ const PARAKEET_FILES: &[&str] = &[
     "vocab.txt",
 ];
 
-pub enum Backend {
-    Whisper(PathBuf),
-    Parakeet(PathBuf),
-}
-
 pub fn cache_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME unset")).join(".cache/hush/models")
 }
 
-/// Returns the active backend with its model path, downloading files as needed.
-/// Preference is read from prefs (HUSH_BACKEND env var overrides).
-pub fn ensure_model() -> Backend {
-    ensure_backend_model(crate::prefs::get_backend() == "parakeet")
-}
-
-pub fn ensure_backend_model(use_parakeet: bool) -> Backend {
-    if use_parakeet {
-        Backend::Parakeet(ensure_parakeet_model())
-    } else {
-        Backend::Whisper(ensure_whisper_model())
+/// Returns the model path (file for Whisper, directory for Parakeet) for the
+/// given backend, downloading any missing files first.
+pub fn ensure_model_for(kind: BackendKind) -> PathBuf {
+    match kind {
+        BackendKind::Whisper => ensure_whisper_model(),
+        BackendKind::Parakeet => ensure_parakeet_model(),
     }
 }
 

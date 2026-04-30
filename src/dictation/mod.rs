@@ -17,7 +17,8 @@ pub use pipeline::{StatusEvent, StatusSink, Trigger};
 
 use pipeline::{Pipeline, Transcriber};
 
-use crate::audio::Backend;
+use crate::audio;
+use crate::config::BackendKind;
 use crate::overlay::OverlayState;
 use cpal_capture::CpalCapture;
 use output::{ClipboardPasteOutput, PostProcessOutput};
@@ -28,24 +29,27 @@ use whisper::WhisperTranscriber;
 const MIN_SAMPLES: usize = 4_800;
 
 pub struct Dictation {
-    backend: Backend,
+    kind: BackendKind,
     overlay: Arc<Mutex<OverlayState>>,
 }
 
 impl Dictation {
-    pub fn production(backend: Backend, overlay: Arc<Mutex<OverlayState>>) -> Self {
-        Self { backend, overlay }
+    pub fn production(kind: BackendKind, overlay: Arc<Mutex<OverlayState>>) -> Self {
+        Self { kind, overlay }
     }
 
     pub fn start_processing(self, rx: Receiver<Trigger>) {
         std::thread::spawn(move || {
+            // Bootstrap (download if missing) and load on the worker thread so
+            // first-launch and live-toggle never block main / NSApp.
+            let model_path = audio::ensure_model_for(self.kind);
             eprintln!("[hush] loading model…");
-            let transcriber: Box<dyn Transcriber + Send + Sync> = match self.backend {
-                Backend::Whisper(path) => Box::new(
-                    WhisperTranscriber::new(&path).expect("load whisper model"),
+            let transcriber: Box<dyn Transcriber + Send + Sync> = match self.kind {
+                BackendKind::Whisper => Box::new(
+                    WhisperTranscriber::new(&model_path).expect("load whisper model"),
                 ),
-                Backend::Parakeet(dir) => Box::new(
-                    ParakeetTranscriber::new(&dir).expect("load parakeet model"),
+                BackendKind::Parakeet => Box::new(
+                    ParakeetTranscriber::new(&model_path).expect("load parakeet model"),
                 ),
             };
             let sink = OverlayStatusSink::new(self.overlay);

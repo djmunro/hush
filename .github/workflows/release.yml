@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          # Strip any prerelease suffix for the comparison so test tags
+          # like v0.2.0-test1 or v0.2.0-rc1 are accepted against
+          # Cargo.toml = 0.2.0. Prereleases skip the cask bump below.
+          TAG_BASE="${TAG_VER%%-*}"
+          if [ "$CARGO_VER" != "$TAG_BASE" ]; then
+            echo "::error::Tag base $TAG_BASE (from $GITHUB_REF_NAME) does not match Cargo.toml $CARGO_VER"
+            exit 1
+          fi
+          echo "VERSION=$CARGO_VER" >> "$GITHUB_ENV"
+          if [ "$TAG_BASE" != "$TAG_VER" ]; then
+            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
+          else
+            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy gate
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: Build + package
+        run: bash scripts/package.sh
+
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            "dist/Hush-${VERSION}.dmg" \
+            "dist/Hush-${VERSION}.zip" \
+            || gh release upload "$GITHUB_REF_NAME" \
+              "dist/Hush-${VERSION}.dmg" \
+              "dist/Hush-${VERSION}.zip" \
+              --clobber
+
+      - name: Bump Homebrew cask
+        if: env.IS_PRERELEASE == 'false'
+        run: |
+          SHA=$(shasum -a 256 "dist/Hush-${VERSION}.dmg" | awk '{print $1}')
+          # The release tag points at a commit before the cask bump. We
+          # commit directly to main, since the cask file lives in this
+          # same repo (custom-URL tap; see README install instructions).
+          git fetch origin main
+          git checkout main
+          sed -i '' "s|version \".*\"|version \"${VERSION}\"|" Casks/hush.rb
+          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Casks/hush.rb
+          if git diff --quiet; then
+            echo "Cask already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Bump cask to ${VERSION}"
+          git push origin main

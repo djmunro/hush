@@ -23,7 +23,7 @@ use objc2_foundation::{
 };
 
 use crate::autostart;
-use crate::config::{self, BackendKind, Shortcut};
+use crate::config::{self, Shortcut};
 use crate::dictation::{Dictation, Trigger};
 use crate::icon;
 use crate::overlay::OverlayState;
@@ -46,10 +46,10 @@ pub struct ControllerIvars {
     accessibility_waiting: Cell<bool>,
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
-    backend_checkbox: OnceCell<Retained<NSButton>>,
+    streaming_checkbox: OnceCell<Retained<NSButton>>,
     trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
     overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
-    backend_switch_lock: OnceCell<Arc<Mutex<()>>>,
+    pipeline_switch_lock: OnceCell<Arc<Mutex<()>>>,
     shortcut_label: OnceCell<Retained<NSTextField>>,
     shortcut_button: OnceCell<Retained<NSButton>>,
     shortcut_recording: Cell<bool>,
@@ -131,36 +131,6 @@ define_class!(
             self.refresh_perm_labels();
         }
 
-        #[unsafe(method(toggleBackend:))]
-        fn toggle_backend(&self, sender: Option<&AnyObject>) {
-            let want_parakeet = sender
-                .and_then(|s| s.downcast_ref::<NSButton>())
-                .map(|b| b.state() == NSControlStateValueOn)
-                .unwrap_or(false);
-            let kind = if want_parakeet {
-                BackendKind::Parakeet
-            } else {
-                BackendKind::Whisper
-            };
-            let mut cfg = config::load();
-            cfg.backend = kind;
-            if let Err(e) = config::save(&cfg) {
-                eprintln!("[hush] failed to save backend pref: {e}");
-            }
-
-            let Some(hub) = self.ivars().trigger_hub.get().cloned() else { return };
-            let Some(overlay) = self.ivars().overlay_state.get().cloned() else { return };
-            let Some(switch_lock) = self.ivars().backend_switch_lock.get().cloned() else { return };
-
-            std::thread::spawn(move || {
-                let _guard = switch_lock.lock().unwrap();
-                let (new_tx, new_rx) = std::sync::mpsc::channel();
-                Dictation::production(kind, overlay).start_processing(new_rx);
-                // Dropping the old sender signals the old pipeline thread to exit.
-                *hub.lock().unwrap() = new_tx;
-            });
-        }
-
         #[unsafe(method(recordShortcut:))]
         fn record_shortcut(&self, _sender: Option<&AnyObject>) {
             self.start_shortcut_recording();
@@ -181,6 +151,31 @@ define_class!(
                 eprintln!("[hush] autostart toggle failed: {e}");
             }
             self.refresh_autostart();
+        }
+
+        #[unsafe(method(toggleStreaming:))]
+        fn toggle_streaming(&self, _sender: Option<&AnyObject>) {
+            let Some(hub) = self.ivars().trigger_hub.get().cloned() else {
+                return;
+            };
+            let Some(overlay) = self.ivars().overlay_state.get().cloned() else {
+                return;
+            };
+            let Some(switch_lock) = self.ivars().pipeline_switch_lock.get().cloned() else {
+                return;
+            };
+
+            std::thread::spawn(move || {
+                let _guard = switch_lock.lock().unwrap();
+                let mut cfg = config::load();
+                cfg.streaming = !cfg.streaming;
+                if let Err(e) = config::save(&cfg) {
+                    eprintln!("[hush] failed to save streaming pref: {e}");
+                }
+                let (new_tx, new_rx) = std::sync::mpsc::channel();
+                Dictation::production(cfg.streaming, overlay).start_processing(new_rx);
+                *hub.lock().unwrap() = new_tx;
+            });
         }
     }
 
@@ -206,10 +201,10 @@ impl AppController {
         }
     }
 
-    fn refresh_backend(&self) {
-        let using_parakeet = config::load().backend == BackendKind::Parakeet;
-        if let Some(checkbox) = self.ivars().backend_checkbox.get() {
-            checkbox.setState(if using_parakeet {
+    fn refresh_autostart(&self) {
+        let enabled = autostart::is_enabled();
+        if let Some(checkbox) = self.ivars().autostart_checkbox.get() {
+            checkbox.setState(if enabled {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
@@ -217,10 +212,10 @@ impl AppController {
         }
     }
 
-    fn refresh_autostart(&self) {
-        let enabled = autostart::is_enabled();
-        if let Some(checkbox) = self.ivars().autostart_checkbox.get() {
-            checkbox.setState(if enabled {
+    fn refresh_streaming(&self) {
+        let cfg = config::load();
+        if let Some(checkbox) = self.ivars().streaming_checkbox.get() {
+            checkbox.setState(if cfg.streaming {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
@@ -494,12 +489,12 @@ pub fn install_menubar_and_window(
     let _ = controller.ivars().overlay_state.set(overlay_state);
     let _ = controller
         .ivars()
-        .backend_switch_lock
+        .pipeline_switch_lock
         .set(Arc::new(Mutex::new(())));
 
     controller.refresh_perm_labels();
     controller.refresh_autostart();
-    controller.refresh_backend();
+    controller.refresh_streaming();
     controller.refresh_shortcut_label();
     UiHandles { controller }
 }
@@ -618,8 +613,8 @@ unsafe fn build_settings_window(
     let transcription_heading = make_label(mtm, ns_string!("Transcription"), 14.0, true);
     stack.addArrangedSubview(&transcription_heading);
 
-    let backend_box = build_backend_card(mtm, controller);
-    add_card(&stack, &backend_box);
+    let streaming_box = build_streaming_card(mtm, controller);
+    add_card(&stack, &streaming_box);
 
     let footer = make_label(
         mtm,
@@ -908,7 +903,7 @@ unsafe fn build_autostart_card(
     box_view
 }
 
-unsafe fn build_backend_card(
+unsafe fn build_streaming_card(
     mtm: MainThreadMarker,
     controller: &AppController,
 ) -> Retained<NSBox> {
@@ -936,15 +931,15 @@ unsafe fn build_backend_card(
 
     let checkbox = NSButton::new(mtm);
     checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
-    checkbox.setTitle(ns_string!("Use Parakeet TDT (parakeet-tdt-0.6b-v3)"));
+    checkbox.setTitle(ns_string!("Experimental: stream audio (160ms chunks)"));
     let target_obj: &AnyObject = controller;
     checkbox.setTarget(Some(target_obj));
-    checkbox.setAction(Some(sel!(toggleBackend:)));
+    checkbox.setAction(Some(sel!(toggleStreaming:)));
     inner.addArrangedSubview(&checkbox);
 
     let desc = make_label(
         mtm,
-        ns_string!("NVIDIA's 0.6B ONNX model — downloads ~300 MB on first use. Switches live in the background."),
+        ns_string!("Feeds audio to Parakeet-EOU in real time instead of buffering the full utterance. May reduce end-to-end latency."),
         11.0,
         false,
     );
@@ -965,7 +960,7 @@ unsafe fn build_backend_card(
         .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
         .setActive(true);
 
-    let _ = controller.ivars().backend_checkbox.set(checkbox);
+    let _ = controller.ivars().streaming_checkbox.set(checkbox);
 
     box_view
 }

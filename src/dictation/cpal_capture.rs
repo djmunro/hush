@@ -24,6 +24,9 @@ enum Cmd {
     Stop {
         reply: mpsc::Sender<Result<Vec<f32>, String>>,
     },
+    DrainChunk {
+        reply: mpsc::Sender<Option<Vec<f32>>>,
+    },
 }
 
 pub struct CpalCapture {
@@ -39,6 +42,14 @@ impl CpalCapture {
         let cb: LevelCb = Arc::new(level_cb);
         std::thread::spawn(move || run(cmd_rx, cb));
         Self { cmd_tx }
+    }
+}
+
+impl CpalCapture {
+    pub fn drain_chunk(&mut self) -> Option<Vec<f32>> {
+        let (tx, rx) = mpsc::channel();
+        self.cmd_tx.send(Cmd::DrainChunk { reply: tx }).ok()?;
+        rx.recv().ok().flatten()
     }
 }
 
@@ -63,6 +74,7 @@ impl Capture for CpalCapture {
 struct StreamState {
     stream: cpal::Stream,
     src_rate: u32,
+    drain_threshold: usize,
     recording: Arc<AtomicBool>,
     buf: Arc<Mutex<Vec<f32>>>,
 }
@@ -101,6 +113,21 @@ fn run(rx: mpsc::Receiver<Cmd>, level_cb: LevelCb) {
                     eprintln!("[hush] stream pause: {e}");
                 }
                 let _ = reply.send(Ok(resample_to_16k(&mono, s.src_rate)));
+            }
+            Cmd::DrainChunk { reply } => {
+                let Some(s) = state.as_ref() else {
+                    let _ = reply.send(None);
+                    continue;
+                };
+                let mut buf = s.buf.lock().unwrap();
+                if buf.len() >= s.drain_threshold {
+                    let chunk: Vec<f32> = buf.drain(..s.drain_threshold).collect();
+                    drop(buf);
+                    let resampled = resample_to_16k(&chunk, s.src_rate);
+                    let _ = reply.send(Some(resampled));
+                } else {
+                    let _ = reply.send(None);
+                }
             }
         }
     }
@@ -178,9 +205,11 @@ fn start_stream(level_cb: LevelCb) -> Result<StreamState, String> {
     }
     .map_err(|e| e.to_string())?;
 
+    let drain_threshold = ((2560.0 * src_rate as f64 / 16_000.0).ceil()) as usize;
     Ok(StreamState {
         stream,
         src_rate,
+        drain_threshold,
         recording,
         buf,
     })

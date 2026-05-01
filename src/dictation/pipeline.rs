@@ -31,6 +31,10 @@ pub enum PipelineError {
 pub trait Capture: Send {
     fn start(&mut self) -> Result<(), String>;
     fn stop(&mut self) -> Result<Vec<f32>, String>;
+    /// Non-blocking: returns the next 2560-sample chunk (at 16kHz) if available, None otherwise.
+    fn drain_chunk(&mut self) -> Option<Vec<f32>> {
+        None
+    }
 }
 
 pub trait Transcriber: Send + Sync {
@@ -51,24 +55,47 @@ pub trait StatusSink: Send + Sync + Clone {
     fn publish(&self, ev: StatusEvent);
 }
 
-pub struct Pipeline<C, T, O, S> {
+pub trait StreamTranscriber: Send {
+    fn start_session(&mut self) -> Result<(), String>;
+    /// Feed a 2560-sample chunk; returns any text decoded so far (may be empty).
+    fn feed(&mut self, chunk: &[f32]) -> Result<String, String>;
+    /// Called on Stop with the final partial chunk; returns any remaining text.
+    fn flush(&mut self, remaining: &[f32]) -> Result<String, String>;
+    fn sample_count(&self) -> usize;
+}
+
+pub struct Pipeline<C, T, ST, O, S> {
     capture: C,
     transcriber: T,
+    stream_transcriber: Option<ST>,
     output: O,
     sink: S,
     min_samples: usize,
     recording: bool,
+    streaming: bool,
 }
 
-impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> {
-    pub fn new(capture: C, transcriber: T, output: O, sink: S, min_samples: usize) -> Self {
+impl<C: Capture, T: Transcriber, ST: StreamTranscriber, O: Output, S: StatusSink>
+    Pipeline<C, T, ST, O, S>
+{
+    pub fn new(
+        capture: C,
+        transcriber: T,
+        stream_transcriber: Option<ST>,
+        output: O,
+        sink: S,
+        min_samples: usize,
+        streaming: bool,
+    ) -> Self {
         Self {
             capture,
             transcriber,
+            stream_transcriber,
             output,
             sink,
             min_samples,
             recording: false,
+            streaming,
         }
     }
 
@@ -84,6 +111,15 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
                     self.sink.publish(StatusEvent::Idle);
                     return Err(PipelineError::Capture(e));
                 }
+                if self.streaming {
+                    if let Some(st) = self.stream_transcriber.as_mut() {
+                        if let Err(e) = st.start_session() {
+                            self.sink.publish(StatusEvent::Error(e.clone()));
+                            self.sink.publish(StatusEvent::Idle);
+                            return Err(PipelineError::Transcribe(e));
+                        }
+                    }
+                }
                 self.recording = true;
                 Ok(())
             }
@@ -91,37 +127,95 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
                 if !self.recording {
                     return Ok(());
                 }
-                let samples = self.capture.stop().map_err(PipelineError::Capture)?;
                 self.recording = false;
                 self.sink.publish(StatusEvent::Stopped);
-                if samples.len() < self.min_samples {
-                    self.sink.publish(StatusEvent::Idle);
-                    return Ok(());
-                }
-                self.sink.publish(StatusEvent::Transcribing);
-                let text = match self.transcriber.transcribe(&samples) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.sink.publish(StatusEvent::Error(e.clone()));
+
+                if self.streaming {
+                    let remaining = self.capture.stop().map_err(PipelineError::Capture)?;
+                    let st = self.stream_transcriber.as_mut().ok_or_else(|| {
+                        PipelineError::Transcribe("no streaming transcriber".to_string())
+                    })?;
+                    if st.sample_count() + remaining.len() < self.min_samples {
                         self.sink.publish(StatusEvent::Idle);
-                        return Err(PipelineError::Transcribe(e));
+                        return Ok(());
                     }
-                };
-                self.sink.publish(StatusEvent::Idle);
-                if !text.is_empty() {
-                    self.output
-                        .deliver(&text)
-                        .map_err(PipelineError::Output)?;
+                    self.sink.publish(StatusEvent::Transcribing);
+                    let text = match st.flush(&remaining) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.sink.publish(StatusEvent::Error(e.clone()));
+                            self.sink.publish(StatusEvent::Idle);
+                            return Err(PipelineError::Transcribe(e));
+                        }
+                    };
+                    self.sink.publish(StatusEvent::Idle);
+                    if !text.is_empty() {
+                        self.output
+                            .deliver(&text)
+                            .map_err(PipelineError::Output)?;
+                    }
+                } else {
+                    let samples = self.capture.stop().map_err(PipelineError::Capture)?;
+                    if samples.len() < self.min_samples {
+                        self.sink.publish(StatusEvent::Idle);
+                        return Ok(());
+                    }
+                    self.sink.publish(StatusEvent::Transcribing);
+                    let text = match self.transcriber.transcribe(&samples) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.sink.publish(StatusEvent::Error(e.clone()));
+                            self.sink.publish(StatusEvent::Idle);
+                            return Err(PipelineError::Transcribe(e));
+                        }
+                    };
+                    self.sink.publish(StatusEvent::Idle);
+                    if !text.is_empty() {
+                        self.output
+                            .deliver(&text)
+                            .map_err(PipelineError::Output)?;
+                    }
                 }
                 Ok(())
             }
         }
     }
 
+    fn drain_streaming_chunks(&mut self) {
+        let Some(st) = self.stream_transcriber.as_mut() else {
+            return;
+        };
+        while let Some(chunk) = self.capture.drain_chunk() {
+            match st.feed(&chunk) {
+                Ok(text) if !text.is_empty() => {
+                    if let Err(e) = self.output.deliver(&text) {
+                        eprintln!("[hush] streaming output: {e}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("[hush] streaming feed: {e}"),
+            }
+        }
+    }
+
     pub fn run(mut self, rx: Receiver<Trigger>) {
-        while let Ok(t) = rx.recv() {
-            if let Err(e) = self.handle(t) {
-                eprintln!("[hush] pipeline: {e:?}");
+        loop {
+            let timeout = if self.recording && self.streaming {
+                std::time::Duration::from_millis(160)
+            } else {
+                std::time::Duration::from_secs(3600)
+            };
+
+            match rx.recv_timeout(timeout) {
+                Ok(t) => {
+                    if let Err(e) = self.handle(t) {
+                        eprintln!("[hush] pipeline: {e:?}");
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    self.drain_streaming_chunks();
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     }
@@ -244,8 +338,25 @@ mod tests {
         }
     }
 
+    struct NoopStreamTranscriber;
+
+    impl StreamTranscriber for NoopStreamTranscriber {
+        fn start_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn feed(&mut self, _chunk: &[f32]) -> Result<String, String> {
+            Ok(String::new())
+        }
+        fn flush(&mut self, _remaining: &[f32]) -> Result<String, String> {
+            Ok(String::new())
+        }
+        fn sample_count(&self) -> usize {
+            0
+        }
+    }
+
     fn make_pipeline() -> (
-        Pipeline<VecCapture, CannedTranscriber, RecordingOutput, VecStatusSink>,
+        Pipeline<VecCapture, CannedTranscriber, NoopStreamTranscriber, RecordingOutput, VecStatusSink>,
         VecCapture,
         RecordingOutput,
         VecStatusSink,
@@ -254,7 +365,7 @@ mod tests {
         let trans = CannedTranscriber::new("hello");
         let out = RecordingOutput::default();
         let sink = VecStatusSink::default();
-        let p = Pipeline::new(cap.clone(), trans, out.clone(), sink.clone(), 4_800);
+        let p = Pipeline::new(cap.clone(), trans, None::<NoopStreamTranscriber>, out.clone(), sink.clone(), 4_800, false);
         (p, cap, out, sink)
     }
 
@@ -297,7 +408,7 @@ mod tests {
         let trans = CannedTranscriber::new("");
         let out = RecordingOutput::default();
         let sink = VecStatusSink::default();
-        let mut p = Pipeline::new(cap, trans, out.clone(), sink.clone(), 4_800);
+        let mut p = Pipeline::new(cap, trans, None::<NoopStreamTranscriber>, out.clone(), sink.clone(), 4_800, false);
         p.handle(Trigger::Start).unwrap();
         p.handle(Trigger::Stop).unwrap();
         assert_eq!(
@@ -318,7 +429,7 @@ mod tests {
         let trans = CannedTranscriber::new("hello");
         let out = RecordingOutput::default();
         let sink = VecStatusSink::default();
-        let mut p = Pipeline::new(cap.clone(), trans, out.clone(), sink.clone(), 4_800);
+        let mut p = Pipeline::new(cap.clone(), trans, None::<NoopStreamTranscriber>, out.clone(), sink.clone(), 4_800, false);
         p.handle(Trigger::Stop).unwrap();
         assert!(sink.events().is_empty());
         assert_eq!(cap.start_count(), 0);
@@ -332,7 +443,7 @@ mod tests {
         let trans = CannedTranscriber::fail("model crashed");
         let out = RecordingOutput::default();
         let sink = VecStatusSink::default();
-        let mut p = Pipeline::new(cap, trans, out.clone(), sink.clone(), 4_800);
+        let mut p = Pipeline::new(cap, trans, None::<NoopStreamTranscriber>, out.clone(), sink.clone(), 4_800, false);
         p.handle(Trigger::Start).unwrap();
         let _ = p.handle(Trigger::Stop);
         assert_eq!(
@@ -355,7 +466,7 @@ mod tests {
         let trans = CannedTranscriber::new("hello");
         let out = RecordingOutput::default();
         let sink = VecStatusSink::default();
-        let mut p = Pipeline::new(cap.clone(), trans, out.clone(), sink.clone(), 4_800);
+        let mut p = Pipeline::new(cap.clone(), trans, None::<NoopStreamTranscriber>, out.clone(), sink.clone(), 4_800, false);
 
         let _ = p.handle(Trigger::Start);
         assert_eq!(
@@ -380,7 +491,7 @@ mod tests {
         let trans = CannedTranscriber::new("should not be delivered");
         let out = RecordingOutput::default();
         let sink = VecStatusSink::default();
-        let mut p = Pipeline::new(cap, trans, out.clone(), sink.clone(), 4_800);
+        let mut p = Pipeline::new(cap, trans, None::<NoopStreamTranscriber>, out.clone(), sink.clone(), 4_800, false);
         p.handle(Trigger::Start).unwrap();
         p.handle(Trigger::Stop).unwrap();
         assert_eq!(

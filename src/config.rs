@@ -172,6 +172,8 @@ pub struct CleanupConfig {
     pub capitalize: bool,
     #[serde(default)]
     pub end_period: bool,
+    #[serde(default)]
+    pub end_question: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

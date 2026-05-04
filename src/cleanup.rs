@@ -9,6 +9,9 @@ pub fn apply_cleanup(text: &str, cleanup_cfg: &CleanupConfig) -> String {
     if cleanup_cfg.end_period {
         result = remove_end_period(&result);
     }
+    if cleanup_cfg.end_question {
+        result = remove_end_question(&result);
+    }
 
     result
 }
@@ -53,6 +56,23 @@ fn remove_end_period(text: &str) -> String {
     }
 
     if trimmed.ends_with('.') && trimmed.len() > 1 {
+        trimmed[..trimmed.len() - 1].to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn remove_end_question(text: &str) -> String {
+    if text.is_empty() {
+        return text.to_string();
+    }
+
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return text.to_string();
+    }
+
+    if trimmed.ends_with('?') && trimmed.len() > 1 {
         trimmed[..trimmed.len() - 1].to_string()
     } else {
         text.to_string()

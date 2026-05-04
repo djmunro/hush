@@ -49,6 +49,7 @@ pub struct ControllerIvars {
     backend_checkbox: OnceCell<Retained<NSButton>>,
     capitalize_checkbox: OnceCell<Retained<NSButton>>,
     period_checkbox: OnceCell<Retained<NSButton>>,
+    question_checkbox: OnceCell<Retained<NSButton>>,
     trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
     overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
     backend_switch_lock: OnceCell<Arc<Mutex<()>>>,
@@ -205,6 +206,16 @@ define_class!(
             }
             self.refresh_cleanup();
         }
+
+        #[unsafe(method(toggleEndQuestion:))]
+        fn toggle_end_question(&self, _sender: Option<&AnyObject>) {
+            let mut cfg = config::load();
+            cfg.cleanup.end_question = !cfg.cleanup.end_question;
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] failed to save cleanup pref: {e}");
+            }
+            self.refresh_cleanup();
+        }
     }
 
     unsafe impl NSObjectProtocol for AppController {}
@@ -262,6 +273,13 @@ impl AppController {
         }
         if let Some(checkbox) = self.ivars().period_checkbox.get() {
             checkbox.setState(if cfg.cleanup.end_period {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+        if let Some(checkbox) = self.ivars().question_checkbox.get() {
+            checkbox.setState(if cfg.cleanup.end_question {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
@@ -996,8 +1014,9 @@ unsafe fn build_cleanup_card(
     let checkboxes_row = NSStackView::new(mtm);
     checkboxes_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
     checkboxes_row.setSpacing(20.0);
-    checkboxes_row.setAlignment(NSLayoutAttribute::Leading);
+    checkboxes_row.setAlignment(NSLayoutAttribute::CenterY);
     checkboxes_row.setDistribution(NSStackViewDistribution::Fill);
+    checkboxes_row.setTranslatesAutoresizingMaskIntoConstraints(false);
 
     let capitalize_checkbox = NSButton::new(mtm);
     capitalize_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
@@ -1013,6 +1032,13 @@ unsafe fn build_cleanup_card(
     period_checkbox.setTarget(Some(target_obj));
     period_checkbox.setAction(Some(sel!(toggleEndPeriod:)));
     checkboxes_row.addArrangedSubview(&period_checkbox);
+
+    let question_checkbox = NSButton::new(mtm);
+    question_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    question_checkbox.setTitle(ns_string!("Remove ending question mark"));
+    question_checkbox.setTarget(Some(target_obj));
+    question_checkbox.setAction(Some(sel!(toggleEndQuestion:)));
+    checkboxes_row.addArrangedSubview(&question_checkbox);
 
     inner.addArrangedSubview(&checkboxes_row);
 
@@ -1030,6 +1056,7 @@ unsafe fn build_cleanup_card(
 
     let _ = controller.ivars().capitalize_checkbox.set(capitalize_checkbox);
     let _ = controller.ivars().period_checkbox.set(period_checkbox);
+    let _ = controller.ivars().question_checkbox.set(question_checkbox);
 
     box_view
 }

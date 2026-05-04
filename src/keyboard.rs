@@ -9,9 +9,13 @@ use std::time::Duration;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
+use crate::cleanup;
+use crate::config::CleanupConfig;
+
 const KEYCODE_V: u16 = 9; // kVK_ANSI_V
 
-pub fn paste(text: &str) -> Result<(), String> {
+pub fn paste(text: &str, cleanup_cfg: &CleanupConfig) -> Result<(), String> {
+    let text = cleanup::apply_cleanup(text, cleanup_cfg);
     let prev = Command::new("pbpaste")
         .output()
         .map(|o| o.stdout)

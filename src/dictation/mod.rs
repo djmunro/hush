@@ -17,7 +17,7 @@ pub use pipeline::{StatusEvent, StatusSink, Trigger};
 use pipeline::{Pipeline, Transcriber};
 
 use crate::audio;
-use crate::config::BackendKind;
+use crate::config::{BackendKind, Config};
 use crate::overlay::OverlayState;
 use cpal_capture::CpalCapture;
 use output::ClipboardPasteOutput;
@@ -33,8 +33,11 @@ pub struct Dictation {
 }
 
 impl Dictation {
-    pub fn production(kind: BackendKind, overlay: Arc<Mutex<OverlayState>>) -> Self {
-        Self { kind, overlay }
+    pub fn production(config: &Config, overlay: Arc<Mutex<OverlayState>>) -> Self {
+        Self {
+            kind: config.backend,
+            overlay,
+        }
     }
 
     pub fn start_processing(self, rx: Receiver<Trigger>) {

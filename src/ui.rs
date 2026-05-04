@@ -91,7 +91,6 @@ define_class!(
         #[unsafe(method(grantAccessibility:))]
         fn grant_accessibility(&self, _sender: Option<&AnyObject>) {
             perms::request_accessibility();
-            perms::open_accessibility_pane();
             self.start_accessibility_wait();
         }
 
@@ -199,7 +198,7 @@ impl AppController {
             unsafe {
                 let mtm = MainThreadMarker::new_unchecked();
                 let app = NSApplication::sharedApplication(mtm);
-                app.activate();
+                app.activateIgnoringOtherApps(true);
                 win.makeKeyAndOrderFront(None);
             }
             self.refresh_perm_labels();

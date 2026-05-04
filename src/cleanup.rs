@@ -143,6 +143,7 @@ mod tests {
         let cfg = CleanupConfig {
             capitalize: false,
             end_period: false,
+            end_question: false,
         };
         assert_eq!(apply_cleanup("Hello world.", &cfg), "Hello world.");
     }
@@ -152,6 +153,7 @@ mod tests {
         let cfg = CleanupConfig {
             capitalize: true,
             end_period: true,
+            end_question: false,
         };
         assert_eq!(apply_cleanup("Hello world.", &cfg), "hello world");
     }
@@ -161,6 +163,7 @@ mod tests {
         let cfg = CleanupConfig {
             capitalize: true,
             end_period: false,
+            end_question: false,
         };
         assert_eq!(apply_cleanup("Hello world.", &cfg), "hello world.");
     }
@@ -170,7 +173,18 @@ mod tests {
         let cfg = CleanupConfig {
             capitalize: false,
             end_period: true,
+            end_question: false,
         };
         assert_eq!(apply_cleanup("Hello world.", &cfg), "Hello world");
+    }
+
+    #[test]
+    fn apply_cleanup_question_only() {
+        let cfg = CleanupConfig {
+            capitalize: false,
+            end_period: false,
+            end_question: true,
+        };
+        assert_eq!(apply_cleanup("Hello world?", &cfg), "Hello world");
     }
 }

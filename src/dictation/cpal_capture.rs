@@ -1,9 +1,9 @@
 //! cpal capture isolated to its own thread. `cpal::Stream` is `!Send`, so
 //! it lives entirely inside the worker thread; the orchestrator drives
 //! capture through mpsc commands. The stream is built lazily on first
-//! `Start` and kept alive thereafter — subsequent `Start`/`Stop` just
-//! toggle an atomic flag, so the second-and-later dictations skip the
-//! 100–300ms cpal cold-start.
+//! `Start` and kept alive thereafter — subsequent `Start`/`Stop` call
+//! stream.play()/pause() so the CoreAudio unit only runs while recording,
+//! which clears the macOS orange microphone indicator between recordings.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -61,7 +61,7 @@ impl Capture for CpalCapture {
 }
 
 struct StreamState {
-    _stream: cpal::Stream,
+    stream: cpal::Stream,
     src_rate: u32,
     recording: Arc<AtomicBool>,
     buf: Arc<Mutex<Vec<f32>>>,
@@ -84,6 +84,10 @@ fn run(rx: mpsc::Receiver<Cmd>, level_cb: LevelCb) {
                 let s = state.as_ref().unwrap();
                 s.buf.lock().unwrap().clear();
                 s.recording.store(true, Ordering::Relaxed);
+                if let Err(e) = s.stream.play() {
+                    let _ = reply.send(Err(format!("stream play: {e}")));
+                    continue;
+                }
                 let _ = reply.send(Ok(()));
             }
             Cmd::Stop { reply } => {
@@ -93,6 +97,9 @@ fn run(rx: mpsc::Receiver<Cmd>, level_cb: LevelCb) {
                 };
                 s.recording.store(false, Ordering::Relaxed);
                 let mono = std::mem::take(&mut *s.buf.lock().unwrap());
+                if let Err(e) = s.stream.pause() {
+                    eprintln!("[hush] stream pause: {e}");
+                }
                 let _ = reply.send(Ok(resample_to_16k(&mono, s.src_rate)));
             }
         }
@@ -171,9 +178,8 @@ fn start_stream(level_cb: LevelCb) -> Result<StreamState, String> {
     }
     .map_err(|e| e.to_string())?;
 
-    stream.play().map_err(|e| e.to_string())?;
     Ok(StreamState {
-        _stream: stream,
+        stream,
         src_rate,
         recording,
         buf,

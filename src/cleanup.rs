@@ -31,10 +31,16 @@ fn remove_beginning_caps(text: &str) -> String {
 
             let rest = chars.as_str();
             if rest.is_empty() {
+                if first == 'I' {
+                    return text.to_string();
+                }
                 return first.to_lowercase().collect();
             }
 
             let second_char = rest.chars().next().unwrap();
+            if first == 'I' && second_char == ' ' {
+                return text.to_string();
+            }
             if second_char == ' ' || second_char.is_lowercase() {
                 let lowercase = first.to_lowercase().collect::<String>();
                 lowercase + rest
@@ -111,6 +117,22 @@ mod tests {
     #[test]
     fn remove_beginning_caps_empty() {
         assert_eq!(remove_beginning_caps(""), "");
+    }
+
+    #[test]
+    fn remove_beginning_caps_preserves_standalone_i() {
+        assert_eq!(remove_beginning_caps("I"), "I");
+    }
+
+    #[test]
+    fn remove_beginning_caps_preserves_i_with_space() {
+        assert_eq!(remove_beginning_caps("I am here"), "I am here");
+        assert_eq!(remove_beginning_caps("I "), "I ");
+    }
+
+    #[test]
+    fn remove_beginning_caps_lowercases_i_when_part_of_word() {
+        assert_eq!(remove_beginning_caps("Idea"), "idea");
     }
 
     #[test]

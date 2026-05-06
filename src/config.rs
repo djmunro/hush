@@ -166,16 +166,29 @@ impl BackendKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CleanupConfig {
+    #[serde(default)]
+    pub capitalize: bool,
+    #[serde(default)]
+    pub end_period: bool,
+    #[serde(default)]
+    pub end_question: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ConfigFile {
     shortcut: Option<String>,
     backend: Option<String>,
+    #[serde(default)]
+    cleanup: Option<CleanupConfig>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub shortcut: Shortcut,
     pub backend: BackendKind,
+    pub cleanup: CleanupConfig,
 }
 
 impl Default for Config {
@@ -183,6 +196,7 @@ impl Default for Config {
         Self {
             shortcut: Shortcut::fn_only(),
             backend: BackendKind::Parakeet,
+            cleanup: CleanupConfig::default(),
         }
     }
 }
@@ -217,15 +231,26 @@ pub fn load() -> Config {
         .and_then(BackendKind::parse)
         .or_else(|| parsed.backend.as_deref().and_then(BackendKind::parse))
         .unwrap_or(BackendKind::Parakeet);
-    Config { shortcut, backend }
+    let cleanup = parsed.cleanup.unwrap_or_default();
+    Config {
+        shortcut,
+        backend,
+        cleanup,
+    }
 }
 
 pub fn save(cfg: &Config) -> Result<(), String> {
     let dir = config_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    let cleanup = if cfg.cleanup != CleanupConfig::default() {
+        Some(cfg.cleanup)
+    } else {
+        None
+    };
     let body = ConfigFile {
         shortcut: Some(cfg.shortcut.to_token()),
         backend: Some(cfg.backend.as_str().to_string()),
+        cleanup,
     };
     let text = toml::to_string_pretty(&body).map_err(|e| e.to_string())?;
     fs::write(config_path(), text).map_err(|e| e.to_string())

@@ -47,6 +47,9 @@ pub struct ControllerIvars {
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
     backend_checkbox: OnceCell<Retained<NSButton>>,
+    capitalize_checkbox: OnceCell<Retained<NSButton>>,
+    period_checkbox: OnceCell<Retained<NSButton>>,
+    question_checkbox: OnceCell<Retained<NSButton>>,
     trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
     overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
     backend_switch_lock: OnceCell<Arc<Mutex<()>>>,
@@ -155,7 +158,8 @@ define_class!(
             std::thread::spawn(move || {
                 let _guard = switch_lock.lock().unwrap();
                 let (new_tx, new_rx) = std::sync::mpsc::channel();
-                Dictation::production(kind, overlay).start_processing(new_rx);
+                let cfg = config::load();
+                Dictation::production(&cfg, overlay).start_processing(new_rx);
                 // Dropping the old sender signals the old pipeline thread to exit.
                 *hub.lock().unwrap() = new_tx;
             });
@@ -181,6 +185,36 @@ define_class!(
                 eprintln!("[hush] autostart toggle failed: {e}");
             }
             self.refresh_autostart();
+        }
+
+        #[unsafe(method(toggleCapitalize:))]
+        fn toggle_capitalize(&self, _sender: Option<&AnyObject>) {
+            let mut cfg = config::load();
+            cfg.cleanup.capitalize = !cfg.cleanup.capitalize;
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] failed to save cleanup pref: {e}");
+            }
+            self.refresh_cleanup();
+        }
+
+        #[unsafe(method(toggleEndPeriod:))]
+        fn toggle_end_period(&self, _sender: Option<&AnyObject>) {
+            let mut cfg = config::load();
+            cfg.cleanup.end_period = !cfg.cleanup.end_period;
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] failed to save cleanup pref: {e}");
+            }
+            self.refresh_cleanup();
+        }
+
+        #[unsafe(method(toggleEndQuestion:))]
+        fn toggle_end_question(&self, _sender: Option<&AnyObject>) {
+            let mut cfg = config::load();
+            cfg.cleanup.end_question = !cfg.cleanup.end_question;
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] failed to save cleanup pref: {e}");
+            }
+            self.refresh_cleanup();
         }
     }
 
@@ -221,6 +255,31 @@ impl AppController {
         let enabled = autostart::is_enabled();
         if let Some(checkbox) = self.ivars().autostart_checkbox.get() {
             checkbox.setState(if enabled {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+    }
+
+    fn refresh_cleanup(&self) {
+        let cfg = config::load();
+        if let Some(checkbox) = self.ivars().capitalize_checkbox.get() {
+            checkbox.setState(if cfg.cleanup.capitalize {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+        if let Some(checkbox) = self.ivars().period_checkbox.get() {
+            checkbox.setState(if cfg.cleanup.end_period {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+        if let Some(checkbox) = self.ivars().question_checkbox.get() {
+            checkbox.setState(if cfg.cleanup.end_question {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
@@ -500,6 +559,7 @@ pub fn install_menubar_and_window(
     controller.refresh_perm_labels();
     controller.refresh_autostart();
     controller.refresh_backend();
+    controller.refresh_cleanup();
     controller.refresh_shortcut_label();
     UiHandles { controller }
 }
@@ -614,6 +674,9 @@ unsafe fn build_settings_window(
 
     let autostart_box = build_autostart_card(mtm, controller);
     add_card(&stack, &autostart_box);
+
+    let cleanup_box = build_cleanup_card(mtm, controller);
+    add_card(&stack, &cleanup_box);
 
     let transcription_heading = make_label(mtm, ns_string!("Transcription"), 14.0, true);
     stack.addArrangedSubview(&transcription_heading);
@@ -904,6 +967,96 @@ unsafe fn build_autostart_card(
         .setActive(true);
 
     let _ = controller.ivars().autostart_checkbox.set(checkbox);
+
+    box_view
+}
+
+unsafe fn build_cleanup_card(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+) -> Retained<NSBox> {
+    let box_view = NSBox::new(mtm);
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setBorderType(objc2_app_kit::NSBorderType::LineBorder);
+    box_view.setBorderColor(&NSColor::separatorColor());
+    box_view.setCornerRadius(10.0);
+    box_view.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+    box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
+    box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let inner = NSStackView::new(mtm);
+    inner.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    inner.setSpacing(6.0);
+    inner.setAlignment(NSLayoutAttribute::Leading);
+    inner.setEdgeInsets(NSEdgeInsets {
+        top: 14.0,
+        left: 16.0,
+        bottom: 14.0,
+        right: 16.0,
+    });
+    inner.setDistribution(NSStackViewDistribution::Fill);
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let label = make_label(mtm, ns_string!("Cleanup"), 13.0, true);
+    inner.addArrangedSubview(&label);
+
+    let desc = make_label(
+        mtm,
+        ns_string!("Optional post-processing of transcriptions."),
+        11.0,
+        false,
+    );
+    desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    desc.setUsesSingleLineMode(false);
+    desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&desc);
+
+    let checkboxes_row = NSStackView::new(mtm);
+    checkboxes_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    checkboxes_row.setSpacing(20.0);
+    checkboxes_row.setAlignment(NSLayoutAttribute::CenterY);
+    checkboxes_row.setDistribution(NSStackViewDistribution::Fill);
+    checkboxes_row.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let capitalize_checkbox = NSButton::new(mtm);
+    capitalize_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    capitalize_checkbox.setTitle(ns_string!("Remove caps from start"));
+    let target_obj: &AnyObject = controller;
+    capitalize_checkbox.setTarget(Some(target_obj));
+    capitalize_checkbox.setAction(Some(sel!(toggleCapitalize:)));
+    checkboxes_row.addArrangedSubview(&capitalize_checkbox);
+
+    let period_checkbox = NSButton::new(mtm);
+    period_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    period_checkbox.setTitle(ns_string!("Remove ending period"));
+    period_checkbox.setTarget(Some(target_obj));
+    period_checkbox.setAction(Some(sel!(toggleEndPeriod:)));
+    checkboxes_row.addArrangedSubview(&period_checkbox);
+
+    let question_checkbox = NSButton::new(mtm);
+    question_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    question_checkbox.setTitle(ns_string!("Remove ending question mark"));
+    question_checkbox.setTarget(Some(target_obj));
+    question_checkbox.setAction(Some(sel!(toggleEndQuestion:)));
+    checkboxes_row.addArrangedSubview(&question_checkbox);
+
+    inner.addArrangedSubview(&checkboxes_row);
+
+    box_view.setContentView(Some(&inner));
+
+    let inner_view: &NSView = &inner;
+    let box_super: &NSView = &box_view;
+    pin_view_to_parent(inner_view, box_super);
+
+    let desc_view: &NSView = &desc;
+    desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let _ = controller.ivars().capitalize_checkbox.set(capitalize_checkbox);
+    let _ = controller.ivars().period_checkbox.set(period_checkbox);
+    let _ = controller.ivars().question_checkbox.set(question_checkbox);
 
     box_view
 }

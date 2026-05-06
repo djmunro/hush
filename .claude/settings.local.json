@@ -5,7 +5,11 @@
       "WebFetch(domain:lib.rs)",
       "WebFetch(domain:github.com)",
       "Bash(python3 -c \"import sys,json,base64; print\\(base64.b64decode\\(json.load\\(sys.stdin\\)['content']\\).decode\\(\\)\\)\")",
-      "Bash(python3 -c \"import sys,json; [print\\(x['name'], x['type']\\) for x in json.load\\(sys.stdin\\)]\")"
+      "Bash(python3 -c \"import sys,json; [print\\(x['name'], x['type']\\) for x in json.load\\(sys.stdin\\)]\")",
+      "Bash(cargo clippy *)",
+      "Bash(git commit *)",
+      "Bash(git tag *)",
+      "Bash(git push *)"
     ]
   }
 }

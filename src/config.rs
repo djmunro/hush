@@ -143,28 +143,6 @@ impl Shortcut {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendKind {
-    Whisper,
-    Parakeet,
-}
-
-impl BackendKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            BackendKind::Whisper => "whisper",
-            BackendKind::Parakeet => "parakeet",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "whisper" => Some(BackendKind::Whisper),
-            "parakeet" => Some(BackendKind::Parakeet),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CleanupConfig {
@@ -179,7 +157,6 @@ pub struct CleanupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ConfigFile {
     shortcut: Option<String>,
-    backend: Option<String>,
     #[serde(default)]
     cleanup: Option<CleanupConfig>,
 }
@@ -187,7 +164,6 @@ struct ConfigFile {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub shortcut: Shortcut,
-    pub backend: BackendKind,
     pub cleanup: CleanupConfig,
 }
 
@@ -195,7 +171,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             shortcut: Shortcut::fn_only(),
-            backend: BackendKind::Parakeet,
             cleanup: CleanupConfig::default(),
         }
     }
@@ -225,18 +200,8 @@ pub fn load() -> Config {
         .as_deref()
         .and_then(Shortcut::from_token)
         .unwrap_or_else(Shortcut::fn_only);
-    let backend = std::env::var("HUSH_BACKEND")
-        .ok()
-        .as_deref()
-        .and_then(BackendKind::parse)
-        .or_else(|| parsed.backend.as_deref().and_then(BackendKind::parse))
-        .unwrap_or(BackendKind::Parakeet);
     let cleanup = parsed.cleanup.unwrap_or_default();
-    Config {
-        shortcut,
-        backend,
-        cleanup,
-    }
+    Config { shortcut, cleanup }
 }
 
 pub fn save(cfg: &Config) -> Result<(), String> {
@@ -249,7 +214,6 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     };
     let body = ConfigFile {
         shortcut: Some(cfg.shortcut.to_token()),
-        backend: Some(cfg.backend.as_str().to_string()),
         cleanup,
     };
     let text = toml::to_string_pretty(&body).map_err(|e| e.to_string())?;

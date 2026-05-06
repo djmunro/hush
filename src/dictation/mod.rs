@@ -7,53 +7,42 @@ pub mod output;
 pub mod overlay_sink;
 pub mod parakeet;
 pub mod pipeline;
-pub mod whisper;
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 pub use pipeline::{StatusEvent, StatusSink, Trigger};
 
-use pipeline::{Pipeline, Transcriber};
+use pipeline::Pipeline;
 
 use crate::audio;
-use crate::config::{BackendKind, Config};
+use crate::config::Config;
 use crate::overlay::OverlayState;
 use cpal_capture::CpalCapture;
 use output::ClipboardPasteOutput;
 use overlay_sink::OverlayStatusSink;
 use parakeet::ParakeetTranscriber;
-use whisper::WhisperTranscriber;
 
 const MIN_SAMPLES: usize = 4_800;
 
 pub struct Dictation {
-    kind: BackendKind,
     overlay: Arc<Mutex<OverlayState>>,
 }
 
 impl Dictation {
-    pub fn production(config: &Config, overlay: Arc<Mutex<OverlayState>>) -> Self {
-        Self {
-            kind: config.backend,
-            overlay,
-        }
+    pub fn production(_config: &Config, overlay: Arc<Mutex<OverlayState>>) -> Self {
+        Self { overlay }
     }
 
     pub fn start_processing(self, rx: Receiver<Trigger>) {
         std::thread::spawn(move || {
             // Bootstrap (download if missing) and load on the worker thread so
-            // first-launch and live-toggle never block main / NSApp.
-            let model_path = audio::ensure_model_for(self.kind);
+            // the first-launch download never blocks main / NSApp.
+            let model_path = audio::ensure_model();
             eprintln!("[hush] loading model…");
-            let transcriber: Box<dyn Transcriber + Send + Sync> = match self.kind {
-                BackendKind::Whisper => Box::new(
-                    WhisperTranscriber::new(&model_path).expect("load whisper model"),
-                ),
-                BackendKind::Parakeet => Box::new(
-                    ParakeetTranscriber::new(&model_path).expect("load parakeet model"),
-                ),
-            };
+            let transcriber = Box::new(
+                ParakeetTranscriber::new(&model_path).expect("load parakeet model"),
+            );
             let sink = OverlayStatusSink::new(self.overlay);
             let level_sink = sink.clone();
             let capture = CpalCapture::new(move |rms| {

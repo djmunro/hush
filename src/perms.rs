@@ -93,12 +93,6 @@ pub fn request_microphone(on_done: impl Fn(bool) + Send + Sync + 'static) {
     }
 }
 
-pub fn open_accessibility_pane() {
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .status();
-}
-
 pub fn open_microphone_pane() {
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")

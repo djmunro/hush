@@ -4,12 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::BackendKind;
-
-const DEFAULT_WHISPER_MODEL: &str = "large-v3-turbo";
-const WHISPER_URL_PREFIX: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-";
-
 const PARAKEET_MODEL_DIR: &str = "parakeet-tdt-0.6b-v3";
 const PARAKEET_URL_PREFIX: &str =
     "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/";
@@ -24,26 +18,9 @@ pub fn cache_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME unset")).join(".cache/hush/models")
 }
 
-/// Returns the model path (file for Whisper, directory for Parakeet) for the
-/// given backend, downloading any missing files first.
-pub fn ensure_model_for(kind: BackendKind) -> PathBuf {
-    match kind {
-        BackendKind::Whisper => ensure_whisper_model(),
-        BackendKind::Parakeet => ensure_parakeet_model(),
-    }
-}
-
-fn ensure_whisper_model() -> PathBuf {
-    let model =
-        std::env::var("WHISPER_MODEL").unwrap_or_else(|_| DEFAULT_WHISPER_MODEL.to_string());
-    let filename = format!("ggml-{model}.bin");
-    let url = format!("{WHISPER_URL_PREFIX}{model}.bin");
-
-    let dir = cache_dir();
-    std::fs::create_dir_all(&dir).expect("create model dir");
-    let path = dir.join(&filename);
-    download_if_missing(&path, &url, &filename);
-    path
+/// Returns the model directory for Parakeet, downloading missing files first.
+pub fn ensure_model_for() -> PathBuf {
+    ensure_parakeet_model()
 }
 
 fn ensure_parakeet_model() -> PathBuf {

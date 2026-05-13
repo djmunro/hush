@@ -41,7 +41,7 @@ the hash is the commit the tag points at.
    from `Cargo.toml`, compares to `${GITHUB_REF_NAME#v}`. Mismatch → fail.
 3. **Install Rust toolchain** (stable, via `dtolnay/rust-toolchain`).
 4. **Cache** Cargo + target dir (`Swatinem/rust-cache`) — first release
-   on a runner is slow (~10 min for whisper.cpp build), subsequent ~3 min.
+   on a runner is slow (~10 min on first run), subsequent ~3 min.
 5. **Clippy gate**: `cargo clippy --release --all-targets -- -D warnings`.
    Matches the CLAUDE.md zero-warnings rule. Fails the release on any
    warning, so we don't ship sloppy builds.

@@ -12,8 +12,9 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
     NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
-    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSStackView,
+    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSScrollView, NSStackView,
     NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField,
+    NSTextView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
@@ -47,9 +48,12 @@ pub struct ControllerIvars {
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
     backend_checkbox: OnceCell<Retained<NSButton>>,
-    capitalize_checkbox: OnceCell<Retained<NSButton>>,
-    period_checkbox: OnceCell<Retained<NSButton>>,
-    question_checkbox: OnceCell<Retained<NSButton>>,
+    parser_enabled_checkbox: OnceCell<Retained<NSButton>>,
+    parser_editor: OnceCell<Retained<NSTextView>>,
+    parser_apply_button: OnceCell<Retained<NSButton>>,
+    parser_reset_button: OnceCell<Retained<NSButton>>,
+    parser_script_snapshot: RefCell<String>,
+    parser_enabled_snapshot: Cell<bool>,
     trigger_hub: OnceCell<Arc<Mutex<Sender<Trigger>>>>,
     overlay_state: OnceCell<Arc<Mutex<OverlayState>>>,
     backend_switch_lock: OnceCell<Arc<Mutex<()>>>,
@@ -110,8 +114,8 @@ define_class!(
             // both invoke C++ atexit destructors, and ggml-metal's
             // teardown asserts that its residency set is empty — which
             // we can't guarantee while the worker thread may still hold
-            // the WhisperContext. Going straight to _exit avoids the
-            // crash on quit.
+            // Any in-flight transcriber resources are torn down with the process.
+            // Going straight to _exit avoids atexit teardown races.
             extern "C" {
                 fn _exit(code: i32) -> !;
             }
@@ -135,17 +139,9 @@ define_class!(
 
         #[unsafe(method(toggleBackend:))]
         fn toggle_backend(&self, sender: Option<&AnyObject>) {
-            let want_parakeet = sender
-                .and_then(|s| s.downcast_ref::<NSButton>())
-                .map(|b| b.state() == NSControlStateValueOn)
-                .unwrap_or(false);
-            let kind = if want_parakeet {
-                BackendKind::Parakeet
-            } else {
-                BackendKind::Whisper
-            };
+            let _ = sender;
             let mut cfg = config::load();
-            cfg.backend = kind;
+            cfg.backend = BackendKind::Parakeet;
             if let Err(e) = config::save(&cfg) {
                 eprintln!("[hush] failed to save backend pref: {e}");
             }
@@ -186,34 +182,54 @@ define_class!(
             self.refresh_autostart();
         }
 
-        #[unsafe(method(toggleCapitalize:))]
-        fn toggle_capitalize(&self, _sender: Option<&AnyObject>) {
+        #[unsafe(method(toggleCustomParser:))]
+        fn toggle_custom_parser(&self, sender: Option<&AnyObject>) {
+            let want_enabled = sender
+                .and_then(|s| s.downcast_ref::<NSButton>())
+                .map(|b| b.state() == NSControlStateValueOn)
+                .unwrap_or(false);
             let mut cfg = config::load();
-            cfg.cleanup.capitalize = !cfg.cleanup.capitalize;
+            cfg.custom_parser.enabled = want_enabled;
             if let Err(e) = config::save(&cfg) {
-                eprintln!("[hush] failed to save cleanup pref: {e}");
+                eprintln!("[hush] failed to save parser config: {e}");
+            } else {
+                self.sync_parser_snapshot(&cfg.custom_parser);
             }
-            self.refresh_cleanup();
+            self.update_parser_buttons();
         }
 
-        #[unsafe(method(toggleEndPeriod:))]
-        fn toggle_end_period(&self, _sender: Option<&AnyObject>) {
-            let mut cfg = config::load();
-            cfg.cleanup.end_period = !cfg.cleanup.end_period;
+        #[unsafe(method(applyCustomParser:))]
+        fn apply_custom_parser(&self, _sender: Option<&AnyObject>) {
+            let cfg = self.current_parser_config_from_ui();
             if let Err(e) = config::save(&cfg) {
-                eprintln!("[hush] failed to save cleanup pref: {e}");
+                eprintln!("[hush] failed to save parser config: {e}");
+            } else {
+                self.sync_parser_snapshot(&cfg.custom_parser);
             }
-            self.refresh_cleanup();
+            self.update_parser_buttons();
         }
 
-        #[unsafe(method(toggleEndQuestion:))]
-        fn toggle_end_question(&self, _sender: Option<&AnyObject>) {
-            let mut cfg = config::load();
-            cfg.cleanup.end_question = !cfg.cleanup.end_question;
-            if let Err(e) = config::save(&cfg) {
-                eprintln!("[hush] failed to save cleanup pref: {e}");
+        #[unsafe(method(resetCustomParser:))]
+        fn reset_custom_parser(&self, _sender: Option<&AnyObject>) {
+            let script = self.ivars().parser_script_snapshot.borrow().clone();
+            let enabled = self.ivars().parser_enabled_snapshot.get();
+            if let Some(checkbox) = self.ivars().parser_enabled_checkbox.get() {
+                checkbox.setState(if enabled {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
             }
-            self.refresh_cleanup();
+            if let Some(editor) = self.ivars().parser_editor.get() {
+                let text = NSString::from_str(&script);
+                editor.setString(&text);
+            }
+            self.update_parser_buttons();
+        }
+
+        #[unsafe(method(markCustomParserDirty:))]
+        fn mark_custom_parser_dirty(&self, _notification: Option<&NSNotification>) {
+            self.update_parser_buttons();
         }
     }
 
@@ -261,28 +277,57 @@ impl AppController {
         }
     }
 
-    fn refresh_cleanup(&self) {
+    fn refresh_parser(&self) {
         let cfg = config::load();
-        if let Some(checkbox) = self.ivars().capitalize_checkbox.get() {
-            checkbox.setState(if cfg.cleanup.capitalize {
+        if let Some(checkbox) = self.ivars().parser_enabled_checkbox.get() {
+            checkbox.setState(if cfg.custom_parser.enabled {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
             });
         }
-        if let Some(checkbox) = self.ivars().period_checkbox.get() {
-            checkbox.setState(if cfg.cleanup.end_period {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
+        if let Some(editor) = self.ivars().parser_editor.get() {
+            let text = NSString::from_str(&cfg.custom_parser.script);
+            editor.setString(&text);
         }
-        if let Some(checkbox) = self.ivars().question_checkbox.get() {
-            checkbox.setState(if cfg.cleanup.end_question {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
+        self.sync_parser_snapshot(&cfg.custom_parser);
+        self.update_parser_buttons();
+    }
+
+    fn sync_parser_snapshot(&self, cfg: &crate::config::CustomParserConfig) {
+        self.ivars().parser_script_snapshot.replace(cfg.script.clone());
+        self.ivars().parser_enabled_snapshot.set(cfg.enabled);
+    }
+
+    fn current_parser_config_from_ui(&self) -> crate::config::Config {
+        let mut cfg = config::load();
+        if let Some(checkbox) = self.ivars().parser_enabled_checkbox.get() {
+            cfg.custom_parser.enabled = checkbox.state() == NSControlStateValueOn;
+        }
+        if let Some(editor) = self.ivars().parser_editor.get() {
+            cfg.custom_parser.script = editor.string().to_string();
+        }
+        cfg
+    }
+
+    fn update_parser_buttons(&self) {
+        let Some(editor) = self.ivars().parser_editor.get() else { return };
+        let current_script = editor.string().to_string();
+        let current_enabled = self
+            .ivars()
+            .parser_enabled_checkbox
+            .get()
+            .is_some_and(|checkbox| checkbox.state() == NSControlStateValueOn);
+        let saved_script = self.ivars().parser_script_snapshot.borrow().as_str().to_string();
+        let saved_enabled = self.ivars().parser_enabled_snapshot.get();
+
+        let dirty = current_script != saved_script || current_enabled != saved_enabled;
+
+        if let Some(apply) = self.ivars().parser_apply_button.get() {
+            apply.setEnabled(dirty);
+        }
+        if let Some(reset) = self.ivars().parser_reset_button.get() {
+            reset.setEnabled(dirty);
         }
     }
 
@@ -476,6 +521,7 @@ pub fn install_menubar_and_window(
     unsafe {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        install_main_menu(mtm, &controller);
 
         // Status item
         let status_bar = NSStatusBar::systemStatusBar();
@@ -558,7 +604,7 @@ pub fn install_menubar_and_window(
     controller.refresh_perm_labels();
     controller.refresh_autostart();
     controller.refresh_backend();
-    controller.refresh_cleanup();
+    controller.refresh_parser();
     controller.refresh_shortcut_label();
     UiHandles { controller }
 }
@@ -577,6 +623,92 @@ unsafe fn menu_item(
     let target_obj: &AnyObject = target;
     item.setTarget(Some(target_obj));
     item
+}
+
+unsafe fn install_main_menu(mtm: MainThreadMarker, controller: &AppController) {
+    let app = NSApplication::sharedApplication(mtm);
+    let controller_obj: &AnyObject = controller;
+    let main_menu = NSMenu::new(mtm);
+
+    let app_menu_item = NSMenuItem::new(mtm);
+    app_menu_item.setTitle(ns_string!("hush"));
+    let app_menu = NSMenu::new(mtm);
+
+    let about_item = NSMenuItem::new(mtm);
+    about_item.setTitle(ns_string!("About hush"));
+    about_item.setEnabled(false);
+
+    let settings_item = NSMenuItem::new(mtm);
+    settings_item.setTitle(ns_string!("Settings…"));
+    settings_item.setAction(Some(sel!(openSettings:)));
+    settings_item.setTarget(Some(controller_obj));
+    settings_item.setKeyEquivalent(ns_string!(","));
+
+    let quit_item = NSMenuItem::new(mtm);
+    quit_item.setTitle(ns_string!("Quit hush"));
+    quit_item.setAction(Some(sel!(quit:)));
+    quit_item.setTarget(Some(controller_obj));
+    quit_item.setKeyEquivalent(ns_string!("q"));
+
+    app_menu.addItem(&about_item);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    app_menu.addItem(&settings_item);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    app_menu.addItem(&quit_item);
+    app_menu_item.setSubmenu(Some(&app_menu));
+
+    let edit_menu_item = NSMenuItem::new(mtm);
+    edit_menu_item.setTitle(ns_string!("Edit"));
+    let edit_menu = NSMenu::new(mtm);
+
+    let undo_item = NSMenuItem::new(mtm);
+    undo_item.setTitle(ns_string!("Undo"));
+    undo_item.setAction(Some(sel!(undo:)));
+    undo_item.setTarget(None);
+    undo_item.setKeyEquivalent(ns_string!("z"));
+    edit_menu.addItem(&undo_item);
+
+    let redo_item = NSMenuItem::new(mtm);
+    redo_item.setTitle(ns_string!("Redo"));
+    redo_item.setAction(Some(sel!(redo:)));
+    redo_item.setTarget(None);
+    redo_item.setKeyEquivalent(ns_string!("Z"));
+    edit_menu.addItem(&redo_item);
+
+    let cut_item = NSMenuItem::new(mtm);
+    cut_item.setTitle(ns_string!("Cut"));
+    cut_item.setAction(Some(sel!(cut:)));
+    cut_item.setTarget(None);
+    cut_item.setKeyEquivalent(ns_string!("x"));
+    edit_menu.addItem(&cut_item);
+
+    let copy_item = NSMenuItem::new(mtm);
+    copy_item.setTitle(ns_string!("Copy"));
+    copy_item.setAction(Some(sel!(copy:)));
+    copy_item.setTarget(None);
+    copy_item.setKeyEquivalent(ns_string!("c"));
+    edit_menu.addItem(&copy_item);
+
+    let paste_item = NSMenuItem::new(mtm);
+    paste_item.setTitle(ns_string!("Paste"));
+    paste_item.setAction(Some(sel!(paste:)));
+    paste_item.setTarget(None);
+    paste_item.setKeyEquivalent(ns_string!("v"));
+    edit_menu.addItem(&paste_item);
+
+    let select_all_item = NSMenuItem::new(mtm);
+    select_all_item.setTitle(ns_string!("Select All"));
+    select_all_item.setAction(Some(sel!(selectAll:)));
+    select_all_item.setTarget(None);
+    select_all_item.setKeyEquivalent(ns_string!("a"));
+    edit_menu.addItem(&select_all_item);
+
+    edit_menu_item.setSubmenu(Some(&edit_menu));
+
+    main_menu.addItem(&app_menu_item);
+    main_menu.addItem(&edit_menu_item);
+
+    app.setMainMenu(Some(&main_menu));
 }
 
 unsafe fn build_settings_window(
@@ -674,8 +806,8 @@ unsafe fn build_settings_window(
     let autostart_box = build_autostart_card(mtm, controller);
     add_card(&stack, &autostart_box);
 
-    let cleanup_box = build_cleanup_card(mtm, controller);
-    add_card(&stack, &cleanup_box);
+    let parser_box = build_parser_card(mtm, controller);
+    add_card(&stack, &parser_box);
 
     let transcription_heading = make_label(mtm, ns_string!("Transcription"), 14.0, true);
     stack.addArrangedSubview(&transcription_heading);
@@ -970,7 +1102,7 @@ unsafe fn build_autostart_card(
     box_view
 }
 
-unsafe fn build_cleanup_card(
+unsafe fn build_parser_card(
     mtm: MainThreadMarker,
     controller: &AppController,
 ) -> Retained<NSBox> {
@@ -996,12 +1128,12 @@ unsafe fn build_cleanup_card(
     inner.setDistribution(NSStackViewDistribution::Fill);
     inner.setTranslatesAutoresizingMaskIntoConstraints(false);
 
-    let label = make_label(mtm, ns_string!("Cleanup"), 13.0, true);
+    let label = make_label(mtm, ns_string!("Custom parser"), 13.0, true);
     inner.addArrangedSubview(&label);
 
     let desc = make_label(
         mtm,
-        ns_string!("Optional post-processing of transcriptions."),
+        ns_string!("Run a final JavaScript transform before paste. Return text or number. Return null/undefined/other values to keep original text."),
         11.0,
         false,
     );
@@ -1010,36 +1142,71 @@ unsafe fn build_cleanup_card(
     desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
     inner.addArrangedSubview(&desc);
 
-    let checkboxes_row = NSStackView::new(mtm);
-    checkboxes_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-    checkboxes_row.setSpacing(20.0);
-    checkboxes_row.setAlignment(NSLayoutAttribute::CenterY);
-    checkboxes_row.setDistribution(NSStackViewDistribution::Fill);
-    checkboxes_row.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let controls = NSStackView::new(mtm);
+    controls.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    controls.setSpacing(12.0);
+    controls.setAlignment(NSLayoutAttribute::CenterY);
+    controls.setDistribution(NSStackViewDistribution::Fill);
+    controls.setTranslatesAutoresizingMaskIntoConstraints(false);
 
-    let capitalize_checkbox = NSButton::new(mtm);
-    capitalize_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
-    capitalize_checkbox.setTitle(ns_string!("Remove caps from start"));
+    let enabled_checkbox = NSButton::new(mtm);
+    enabled_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
+    enabled_checkbox.setTitle(ns_string!("Enable custom parser"));
     let target_obj: &AnyObject = controller;
-    capitalize_checkbox.setTarget(Some(target_obj));
-    capitalize_checkbox.setAction(Some(sel!(toggleCapitalize:)));
-    checkboxes_row.addArrangedSubview(&capitalize_checkbox);
+    enabled_checkbox.setTarget(Some(target_obj));
+    enabled_checkbox.setAction(Some(sel!(toggleCustomParser:)));
+    controls.addArrangedSubview(&enabled_checkbox);
 
-    let period_checkbox = NSButton::new(mtm);
-    period_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
-    period_checkbox.setTitle(ns_string!("Remove ending period"));
-    period_checkbox.setTarget(Some(target_obj));
-    period_checkbox.setAction(Some(sel!(toggleEndPeriod:)));
-    checkboxes_row.addArrangedSubview(&period_checkbox);
+    let apply_button = NSButton::new(mtm);
+    apply_button.setTitle(ns_string!("Apply"));
+    apply_button.setBezelStyle(NSBezelStyle::Rounded);
+    apply_button.setControlSize(NSControlSize::Regular);
+    apply_button.setTarget(Some(target_obj));
+    apply_button.setAction(Some(sel!(applyCustomParser:)));
+    controls.addArrangedSubview(&apply_button);
 
-    let question_checkbox = NSButton::new(mtm);
-    question_checkbox.setButtonType(objc2_app_kit::NSButtonType::Switch);
-    question_checkbox.setTitle(ns_string!("Remove ending question mark"));
-    question_checkbox.setTarget(Some(target_obj));
-    question_checkbox.setAction(Some(sel!(toggleEndQuestion:)));
-    checkboxes_row.addArrangedSubview(&question_checkbox);
+    let reset_button = NSButton::new(mtm);
+    reset_button.setTitle(ns_string!("Reset"));
+    reset_button.setBezelStyle(NSBezelStyle::Rounded);
+    reset_button.setControlSize(NSControlSize::Regular);
+    reset_button.setTarget(Some(target_obj));
+    reset_button.setAction(Some(sel!(resetCustomParser:)));
+    controls.addArrangedSubview(&reset_button);
 
-    inner.addArrangedSubview(&checkboxes_row);
+    let scroll = NSScrollView::new(mtm);
+    scroll.setHasVerticalScroller(true);
+    scroll.setHasHorizontalScroller(false);
+    scroll.setDrawsBackground(true);
+
+    let editor = NSTextView::new(mtm);
+    editor.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    let ns_text = NSString::from_str("");
+    editor.setString(&ns_text);
+
+    scroll.setDocumentView(Some(&editor));
+    scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let editor_height = scroll
+        .heightAnchor()
+        .constraintEqualToConstant(132.0);
+    editor_height.setActive(true);
+    inner.addArrangedSubview(&scroll);
+
+    let editor_for_notify = editor.clone();
+    let _ = controller.ivars().parser_editor.set(editor);
+    let _ = controller.ivars().parser_enabled_checkbox.set(enabled_checkbox);
+    let _ = controller.ivars().parser_apply_button.set(apply_button);
+    let _ = controller.ivars().parser_reset_button.set(reset_button);
+    controller.refresh_parser();
+    inner.addArrangedSubview(&controls);
+
+    let name = ns_string!("NSTextDidChangeNotification");
+    let center = NSNotificationCenter::defaultCenter();
+    center.addObserver_selector_name_object(
+        controller,
+        sel!(markCustomParserDirty:),
+        Some(name),
+        Some(&*editor_for_notify),
+    );
 
     box_view.setContentView(Some(&inner));
 
@@ -1053,12 +1220,15 @@ unsafe fn build_cleanup_card(
         .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
         .setActive(true);
 
-    let _ = controller.ivars().capitalize_checkbox.set(capitalize_checkbox);
-    let _ = controller.ivars().period_checkbox.set(period_checkbox);
-    let _ = controller.ivars().question_checkbox.set(question_checkbox);
+    let scroll_view: &NSView = &scroll;
+    scroll_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
 
     box_view
 }
+
 
 unsafe fn build_backend_card(
     mtm: MainThreadMarker,

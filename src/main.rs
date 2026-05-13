@@ -2,7 +2,6 @@
 
 mod audio;
 mod autostart;
-mod cleanup;
 mod config;
 mod dictation;
 mod icon;

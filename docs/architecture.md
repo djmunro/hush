@@ -15,7 +15,7 @@ src/
 │                 the screen. Three modes (Hidden / Recording /
 │                 Transcribing) driven by shared OverlayState. Custom
 │                 NSView subclass with drawRect: for the bars and dots.
-├── audio.rs      One-shot whisper-model bootstrap (cache_dir, ensure_model).
+├── audio.rs      One-shot parakeet-model bootstrap (cache_dir, ensure_model).
 │                 The capture/transcribe/output pipeline lives in dictation/.
 ├── dictation/    Hexagonal dictation pipeline. pipeline.rs is the pure-sync
 │   │             state machine + four port traits (Capture / Transcriber /
@@ -24,7 +24,7 @@ src/
 │   │                     + boundary tests with in-memory fakes.
 │   ├── cpal_capture.rs   CpalCapture — owns its own thread; the !Send
 │   │                     cpal::Stream stays inside it. mpsc commands cross.
-│   ├── whisper.rs        WhisperTranscriber wrapping WhisperContext.
+│   ├── parakeet.rs       ParakeetTranscriber.
 │   ├── output.rs         ClipboardPasteOutput → keyboard::paste.
 │   ├── overlay_sink.rs   OverlayStatusSink — mutates OverlayState and
 │   │                     plays Tink / Pop on Recording / Idle.
@@ -63,13 +63,13 @@ src/
                 │     owns the !Send cpal::Stream; callback │
                 │     emits LevelTick into StatusSink.      │
                 │   On Trigger::Stop: drain buffer, run     │
-                │     whisper, paste via CGEventPost.       │
+│     transcriber, paste via CGEventPost.    │
                 └────────────────────────────────────────────┘
 ```
 
 The cpal stream's `!Send` constraint forces the audio capture to live on
 whatever thread first creates it. We put it on the worker so the main
-thread (NSApp) is never blocked by the ~6 second whisper inference.
+thread (NSApp) is never blocked by the transcriber inference.
 
 The NSEvent global monitor's block is the only piece that lives on main
 but talks to the worker — it sends `Trigger::Start` / `Trigger::Stop` on an mpsc
@@ -186,12 +186,11 @@ We learned these the hard way in the settings window:
   `widthAnchor` constraint binding each child to the stack's width minus
   edge insets.
 
-## Quit and ggml-metal teardown
+## Quit and transcriber teardown
 
 `NSApplication::terminate` calls `libc::exit`, which runs C++ atexit
-destructors, which trigger ggml-metal's destructor, which asserts that its
-Metal residency set is empty (`GGML_ASSERT([rsets->data count] == 0)`).
-Since the worker thread may still hold the WhisperContext, this fails and
+destructors, which can run while transcriber model resources are still alive.
+Since the worker thread may still hold those resources, this fails and
 the app crashes during quit.
 
 Fix: in the `quit:` selector we call `libc::_exit(0)` directly, which

@@ -145,26 +145,32 @@ impl Shortcut {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    Whisper,
     Parakeet,
 }
 
 impl BackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            BackendKind::Whisper => "whisper",
             BackendKind::Parakeet => "parakeet",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "whisper" => Some(BackendKind::Whisper),
             "parakeet" => Some(BackendKind::Parakeet),
             _ => None,
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CustomParserConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub script: String,
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CleanupConfig {
@@ -182,6 +188,8 @@ struct ConfigFile {
     backend: Option<String>,
     #[serde(default)]
     cleanup: Option<CleanupConfig>,
+    #[serde(default)]
+    custom_parser: Option<CustomParserConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +197,7 @@ pub struct Config {
     pub shortcut: Shortcut,
     pub backend: BackendKind,
     pub cleanup: CleanupConfig,
+    pub custom_parser: CustomParserConfig,
 }
 
 impl Default for Config {
@@ -197,6 +206,7 @@ impl Default for Config {
             shortcut: Shortcut::fn_only(),
             backend: BackendKind::Parakeet,
             cleanup: CleanupConfig::default(),
+            custom_parser: CustomParserConfig::default(),
         }
     }
 }
@@ -232,10 +242,12 @@ pub fn load() -> Config {
         .or_else(|| parsed.backend.as_deref().and_then(BackendKind::parse))
         .unwrap_or(BackendKind::Parakeet);
     let cleanup = parsed.cleanup.unwrap_or_default();
+    let custom_parser = parsed.custom_parser.unwrap_or_default();
     Config {
         shortcut,
         backend,
         cleanup,
+        custom_parser,
     }
 }
 
@@ -251,6 +263,7 @@ pub fn save(cfg: &Config) -> Result<(), String> {
         shortcut: Some(cfg.shortcut.to_token()),
         backend: Some(cfg.backend.as_str().to_string()),
         cleanup,
+        custom_parser: Some(cfg.custom_parser.clone()),
     };
     let text = toml::to_string_pretty(&body).map_err(|e| e.to_string())?;
     fs::write(config_path(), text).map_err(|e| e.to_string())

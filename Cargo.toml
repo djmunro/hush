@@ -7,9 +7,10 @@ license = "MIT"
 
 [dependencies]
 cpal = "0.17"
-whisper-rs = { version = "0.16", features = ["metal"] }
 parakeet-rs = "0.3"
+deno_core = "0.315"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 core-foundation = "0.10"
 core-graphics = "0.25"

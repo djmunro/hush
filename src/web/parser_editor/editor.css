@@ -1,0 +1,25 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+#editor-root {
+  height: 100%;
+  width: 100%;
+}
+
+.cm-editor {
+  height: 100%;
+  font-size: 12px;
+}
+
+.cm-scroller {
+  font-family: inherit;
+  line-height: 1.45;
+}

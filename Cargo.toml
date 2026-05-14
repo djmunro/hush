@@ -34,11 +34,23 @@ objc2-av-foundation = { version = "0.3", features = [
     "AVCaptureDevice",
     "AVMediaFormat",
 ] }
+objc2-web-kit = { version = "0.3", features = [
+    "objc2-app-kit",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKUserContentController",
+    "WKScriptMessage",
+    "WKScriptMessageHandler",
+    "WKNavigation",
+    "block2",
+] }
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "block2",
     "NSApplication",
     "NSResponder",
+    "NSEvent",
+    "NSPasteboard",
     "NSWindow",
     "NSView",
     "NSTextField",
@@ -56,7 +68,6 @@ objc2-app-kit = { version = "0.3", features = [
     "NSBezierPath",
     "NSStackView",
     "NSLayoutConstraint",
-    "NSEvent",
     "NSCell",
     "NSImageView",
     "NSBox",

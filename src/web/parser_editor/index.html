@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <style>
+/*__HUSH_CSS__*/
+    </style>
+  </head>
+  <body>
+    <div id="editor-root"></div>
+    <script type="module">
+      import { EditorView, keymap, lineWrapping } from "https://esm.sh/@codemirror/view@6.39.2";
+      import { EditorState } from "https://esm.sh/@codemirror/state@6.5.2";
+      import { basicSetup } from "https://esm.sh/codemirror@6.0.2";
+      import { javascript } from "https://esm.sh/@codemirror/lang-javascript@6.2.4";
+      import { indentWithTab, undo, redo } from "https://esm.sh/@codemirror/commands@6.10.0";
+
+      const bridge = window.webkit?.messageHandlers?.hushParser;
+      const post = (payload) => {
+        if (bridge) {
+          bridge.postMessage(JSON.stringify(payload));
+        }
+      };
+      const root = document.getElementById("editor-root");
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "",
+          extensions: [
+            basicSetup,
+            javascript(),
+            lineWrapping,
+            keymap.of([indentWithTab]),
+            EditorView.updateListener.of((update) => {
+              if (!update.docChanged) {
+                return;
+              }
+              post({ type: "changed", script: view.state.doc.toString() });
+            }),
+          ],
+        }),
+        parent: root,
+      });
+      window.hushEditor = {
+        setScript(script) {
+          const next = typeof script === "string" ? script : "";
+          view.dispatch({
+            changes: {
+              from: 0,
+              to: view.state.doc.length,
+              insert: next,
+            },
+          });
+        },
+        getScript() {
+          return view.state.doc.toString();
+        },
+        focus() {
+          view.focus();
+        },
+        nativeUndo() {
+          view.focus();
+          undo({ state: view.state, dispatch: (tr) => view.dispatch(tr) });
+        },
+        nativeRedo() {
+          view.focus();
+          redo({ state: view.state, dispatch: (tr) => view.dispatch(tr) });
+        },
+        nativePaste(json) {
+          const text = JSON.parse(json);
+          const t = typeof text === "string" ? text : "";
+          view.focus();
+          view.dispatch(view.state.replaceSelection(t));
+        },
+      };
+      post({ type: "ready", script: "" });
+    </script>
+  </body>
+</html>

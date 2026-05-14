@@ -7,20 +7,24 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
-use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::{define_class, msg_send, sel, AllocAnyThread, ClassType, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
     NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
-    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSScrollView, NSStackView,
+    NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSLayoutAttribute, NSLineBreakMode,
+    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSStackView,
     NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField,
-    NSTextView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSEdgeInsets, NSNotification, NSNotificationCenter, NSObject,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
+};
+use objc2_web_kit::{
+    WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView,
+    WKWebViewConfiguration,
 };
 
 use crate::autostart;
@@ -36,6 +40,64 @@ const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_HASH: &str = env!("HUSH_GIT_HASH");
 
+const PARSER_MESSAGE_HANDLER_NAME: &str = "hushParser";
+const PARSER_EDITOR_HTML_TEMPLATE: &str = include_str!("web/parser_editor/index.html");
+const PARSER_EDITOR_CSS: &str = include_str!("web/parser_editor/editor.css");
+const PARSER_DEFAULT_SCRIPT: &str = r#"  const s = input.trim().replace(/[.?]+$/, "");
+  if (!s) return s;
+  if (s.startsWith("I ")) return s;
+  return `${s[0].toLowerCase()}${s.slice(1)}`;"#;
+
+fn parser_editor_html() -> String {
+    PARSER_EDITOR_HTML_TEMPLATE.replace("/*__HUSH_CSS__*/", PARSER_EDITOR_CSS)
+}
+
+struct ParserMessageHandlerIvars {
+    controller_ptr: usize,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "HushParserMessageHandler"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ParserMessageHandlerIvars]
+    struct ParserMessageHandler;
+
+    unsafe impl NSObjectProtocol for ParserMessageHandler {}
+
+    unsafe impl WKScriptMessageHandler for ParserMessageHandler {
+        #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+        fn did_receive(
+            this: &ParserMessageHandler,
+            _controller: &WKUserContentController,
+            message: &WKScriptMessage,
+        ) {
+            let ptr = this.ivars().controller_ptr as *const AppController;
+            if ptr.is_null() {
+                return;
+            }
+            let body = unsafe { message.body() };
+            let Ok(body) = body.downcast::<NSString>() else {
+                return;
+            };
+            let payload = body.to_string();
+            let controller = unsafe { &*ptr };
+            controller.handle_parser_message(&payload);
+        }
+    }
+);
+
+impl ParserMessageHandler {
+    fn new(mtm: MainThreadMarker, controller: &AppController) -> Retained<Self> {
+        let this = mtm
+            .alloc::<Self>()
+            .set_ivars(ParserMessageHandlerIvars {
+                controller_ptr: controller as *const AppController as usize,
+            });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
 #[derive(Default)]
 pub struct ControllerIvars {
     status_item: OnceCell<Retained<NSStatusItem>>,
@@ -48,7 +110,11 @@ pub struct ControllerIvars {
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
     parser_enabled_checkbox: OnceCell<Retained<NSButton>>,
-    parser_editor: OnceCell<Retained<NSTextView>>,
+    parser_webview: OnceCell<Retained<WKWebView>>,
+    parser_message_handler: OnceCell<Retained<ParserMessageHandler>>,
+    parser_ready: Cell<bool>,
+    parser_pending_script: RefCell<Option<String>>,
+    parser_current_script: RefCell<String>,
     parser_apply_button: OnceCell<Retained<NSButton>>,
     parser_reset_button: OnceCell<Retained<NSButton>>,
     parser_script_snapshot: RefCell<String>,
@@ -122,7 +188,13 @@ define_class!(
 
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _note: Option<&NSNotification>) {
+            self.promote_to_regular_app();
             self.refresh_perm_labels();
+        }
+
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _note: Option<&NSNotification>) {
+            self.demote_to_accessory_app();
         }
 
         #[unsafe(method(appDidBecomeActive:))]
@@ -195,15 +267,13 @@ define_class!(
                     NSControlStateValueOff
                 });
             }
-            if let Some(editor) = self.ivars().parser_editor.get() {
-                let text = NSString::from_str(&script);
-                editor.setString(&text);
-            }
+            self.parser_set_script_in_webview(&script);
             self.update_parser_buttons();
         }
 
-        #[unsafe(method(markCustomParserDirty:))]
-        fn mark_custom_parser_dirty(&self, _notification: Option<&NSNotification>) {
+        #[unsafe(method(defaultCustomParser:))]
+        fn default_custom_parser(&self, _sender: Option<&AnyObject>) {
+            self.parser_set_script_in_webview(PARSER_DEFAULT_SCRIPT);
             self.update_parser_buttons();
         }
     }
@@ -223,10 +293,27 @@ impl AppController {
             unsafe {
                 let mtm = MainThreadMarker::new_unchecked();
                 let app = NSApplication::sharedApplication(mtm);
+                app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
                 app.activateIgnoringOtherApps(true);
                 win.makeKeyAndOrderFront(None);
             }
             self.refresh_perm_labels();
+        }
+    }
+
+    fn promote_to_regular_app(&self) {
+        unsafe {
+            let mtm = MainThreadMarker::new_unchecked();
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        }
+    }
+
+    fn demote_to_accessory_app(&self) {
+        unsafe {
+            let mtm = MainThreadMarker::new_unchecked();
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         }
     }
 
@@ -250,10 +337,7 @@ impl AppController {
                 NSControlStateValueOff
             });
         }
-        if let Some(editor) = self.ivars().parser_editor.get() {
-            let text = NSString::from_str(&cfg.custom_parser.script);
-            editor.setString(&text);
-        }
+        self.parser_set_script_in_webview(&cfg.custom_parser.script);
         self.sync_parser_snapshot(&cfg.custom_parser);
         self.update_parser_buttons();
     }
@@ -268,15 +352,12 @@ impl AppController {
         if let Some(checkbox) = self.ivars().parser_enabled_checkbox.get() {
             cfg.custom_parser.enabled = checkbox.state() == NSControlStateValueOn;
         }
-        if let Some(editor) = self.ivars().parser_editor.get() {
-            cfg.custom_parser.script = editor.string().to_string();
-        }
+        cfg.custom_parser.script = self.ivars().parser_current_script.borrow().clone();
         cfg
     }
 
     fn update_parser_buttons(&self) {
-        let Some(editor) = self.ivars().parser_editor.get() else { return };
-        let current_script = editor.string().to_string();
+        let current_script = self.ivars().parser_current_script.borrow().clone();
         let current_enabled = self
             .ivars()
             .parser_enabled_checkbox
@@ -292,6 +373,58 @@ impl AppController {
         }
         if let Some(reset) = self.ivars().parser_reset_button.get() {
             reset.setEnabled(dirty);
+        }
+    }
+
+    fn parser_set_script_in_webview(&self, script: &str) {
+        self.ivars().parser_current_script.replace(script.to_string());
+        if !self.ivars().parser_ready.get() {
+            self.ivars()
+                .parser_pending_script
+                .replace(Some(script.to_string()));
+            return;
+        }
+
+        let Some(webview) = self.ivars().parser_webview.get() else {
+            return;
+        };
+        let Ok(script_json) = serde_json::to_string(script) else {
+            return;
+        };
+        let js = format!(
+            "if (window.hushEditor) {{ window.hushEditor.setScript({script_json}); }}"
+        );
+        let js_ns = NSString::from_str(&js);
+        unsafe {
+            webview.evaluateJavaScript_completionHandler(&js_ns, None);
+        }
+    }
+
+    fn handle_parser_message(&self, payload: &str) {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        let Some(message_type) = message.get("type").and_then(|v| v.as_str()) else {
+            return;
+        };
+
+        match message_type {
+            "ready" => {
+                self.ivars().parser_ready.set(true);
+                if let Some(pending_script) = self.ivars().parser_pending_script.take() {
+                    self.parser_set_script_in_webview(&pending_script);
+                } else if let Some(script) = message.get("script").and_then(|v| v.as_str()) {
+                    self.ivars().parser_current_script.replace(script.to_string());
+                }
+                self.update_parser_buttons();
+            }
+            "changed" => {
+                if let Some(script) = message.get("script").and_then(|v| v.as_str()) {
+                    self.ivars().parser_current_script.replace(script.to_string());
+                    self.update_parser_buttons();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -444,7 +577,148 @@ impl AppController {
         }
         self.refresh_perm_labels();
     }
+
+    fn parser_try_native_undo(&self) {
+        unsafe {
+            let Some(wv) = self.ivars().parser_webview.get() else {
+                return;
+            };
+            if !self.ivars().parser_ready.get() {
+                return;
+            }
+            let js = ns_string!(
+                "window.hushEditor&&window.hushEditor.nativeUndo&&window.hushEditor.nativeUndo()"
+            );
+            wv.evaluateJavaScript_completionHandler(js, None);
+        }
+    }
+
+    fn parser_try_native_redo(&self) {
+        unsafe {
+            let Some(wv) = self.ivars().parser_webview.get() else {
+                return;
+            };
+            if !self.ivars().parser_ready.get() {
+                return;
+            }
+            let js = ns_string!(
+                "window.hushEditor&&window.hushEditor.nativeRedo&&window.hushEditor.nativeRedo()"
+            );
+            wv.evaluateJavaScript_completionHandler(js, None);
+        }
+    }
+
+    fn parser_try_native_paste(&self) {
+        unsafe {
+            let Some(wv) = self.ivars().parser_webview.get() else {
+                return;
+            };
+            if !self.ivars().parser_ready.get() {
+                return;
+            }
+            let pb = NSPasteboard::generalPasteboard();
+            let Some(text) = pb.stringForType(NSPasteboardTypeString) else {
+                return;
+            };
+            let payload = serde_json::to_string(text.to_string().as_str()).unwrap_or_default();
+            let script = format!(
+                "window.hushEditor&&window.hushEditor.nativePaste&&window.hushEditor.nativePaste({})",
+                payload
+            );
+            let js = NSString::from_str(&script);
+            wv.evaluateJavaScript_completionHandler(&js, None);
+        }
+    }
 }
+
+struct HushSettingsWindowIvars {
+    controller_ptr: usize,
+}
+
+unsafe fn hush_first_responder_in_parser_webview(
+    window: &NSWindow,
+    parser_wv: &Retained<WKWebView>,
+) -> bool {
+    let Some(fr) = window.firstResponder() else {
+        return false;
+    };
+    if Retained::as_ptr(&fr).cast::<()>() == Retained::as_ptr(parser_wv).cast::<()>() {
+        return true;
+    }
+    let fr_obj = &*(std::ptr::from_ref(&*fr).cast::<AnyObject>());
+    let is_view: bool = msg_send![fr_obj, isKindOfClass: NSView::class()];
+    if !is_view {
+        return false;
+    }
+    let fr_view: &NSView = &*(std::ptr::from_ref(fr_obj).cast::<NSView>());
+    let wv_view: &NSView = parser_wv;
+    fr_view.isDescendantOf(wv_view)
+}
+
+unsafe fn hush_parser_edit_key_for_controller(
+    window: &NSWindow,
+    controller: &AppController,
+    event: &NSEvent,
+) -> bool {
+    if event.r#type() != NSEventType::KeyDown {
+        return false;
+    }
+    let Some(parser_wv) = controller.ivars().parser_webview.get() else {
+        return false;
+    };
+    if !hush_first_responder_in_parser_webview(window, parser_wv) {
+        return false;
+    }
+    let flags = event.modifierFlags();
+    let mods = flags.intersection(NSEventModifierFlags::DeviceIndependentFlagsMask);
+    if !mods.contains(NSEventModifierFlags::Command) {
+        return false;
+    }
+    let Some(chars) = event.charactersIgnoringModifiers() else {
+        return false;
+    };
+    let key = chars.to_string();
+    if key.eq_ignore_ascii_case("z") {
+        let shift = mods.contains(NSEventModifierFlags::Shift);
+        if shift {
+            controller.parser_try_native_redo();
+        } else {
+            controller.parser_try_native_undo();
+        }
+        return true;
+    }
+    if key == "v" && !mods.contains(NSEventModifierFlags::Shift) {
+        controller.parser_try_native_paste();
+        return true;
+    }
+    false
+}
+
+define_class!(
+    #[unsafe(super(NSWindow))]
+    #[name = "HushSettingsWindow"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = HushSettingsWindowIvars]
+    struct HushSettingsWindow;
+
+    unsafe impl NSObjectProtocol for HushSettingsWindow {}
+
+    impl HushSettingsWindow {
+        #[unsafe(method(sendEvent:))]
+        fn send_event(this: &Self, event: &NSEvent) {
+            let ptr = this.ivars().controller_ptr;
+            if ptr != 0 {
+                let controller = unsafe { &*(ptr as *const AppController) };
+                let window: &NSWindow =
+                    unsafe { std::mem::transmute::<&HushSettingsWindow, &NSWindow>(this) };
+                if unsafe { hush_parser_edit_key_for_controller(window, controller, event) } {
+                    return;
+                }
+            }
+            unsafe { msg_send![super(this), sendEvent: event] }
+        }
+    }
+);
 
 unsafe fn mic_status_text(state: MicState) -> Retained<NSString> {
     let text = match state {
@@ -533,6 +807,12 @@ pub fn install_menubar_and_window(
             Some(ns_string!("NSWindowDidBecomeKeyNotification")),
             Some(&*window),
         );
+        center.addObserver_selector_name_object(
+            observer,
+            sel!(windowWillClose:),
+            Some(ns_string!("NSWindowWillCloseNotification")),
+            Some(&*window),
+        );
         // Fires whenever hush comes to the foreground (cmd-tab, click on
         // the menubar icon, etc.) — catches the "user came back from
         // System Settings" case the window-key notification misses.
@@ -615,56 +895,7 @@ unsafe fn install_main_menu(mtm: MainThreadMarker, controller: &AppController) {
     app_menu.addItem(&quit_item);
     app_menu_item.setSubmenu(Some(&app_menu));
 
-    let edit_menu_item = NSMenuItem::new(mtm);
-    edit_menu_item.setTitle(ns_string!("Edit"));
-    let edit_menu = NSMenu::new(mtm);
-
-    let undo_item = NSMenuItem::new(mtm);
-    undo_item.setTitle(ns_string!("Undo"));
-    undo_item.setAction(Some(sel!(undo:)));
-    undo_item.setTarget(None);
-    undo_item.setKeyEquivalent(ns_string!("z"));
-    edit_menu.addItem(&undo_item);
-
-    let redo_item = NSMenuItem::new(mtm);
-    redo_item.setTitle(ns_string!("Redo"));
-    redo_item.setAction(Some(sel!(redo:)));
-    redo_item.setTarget(None);
-    redo_item.setKeyEquivalent(ns_string!("Z"));
-    edit_menu.addItem(&redo_item);
-
-    let cut_item = NSMenuItem::new(mtm);
-    cut_item.setTitle(ns_string!("Cut"));
-    cut_item.setAction(Some(sel!(cut:)));
-    cut_item.setTarget(None);
-    cut_item.setKeyEquivalent(ns_string!("x"));
-    edit_menu.addItem(&cut_item);
-
-    let copy_item = NSMenuItem::new(mtm);
-    copy_item.setTitle(ns_string!("Copy"));
-    copy_item.setAction(Some(sel!(copy:)));
-    copy_item.setTarget(None);
-    copy_item.setKeyEquivalent(ns_string!("c"));
-    edit_menu.addItem(&copy_item);
-
-    let paste_item = NSMenuItem::new(mtm);
-    paste_item.setTitle(ns_string!("Paste"));
-    paste_item.setAction(Some(sel!(paste:)));
-    paste_item.setTarget(None);
-    paste_item.setKeyEquivalent(ns_string!("v"));
-    edit_menu.addItem(&paste_item);
-
-    let select_all_item = NSMenuItem::new(mtm);
-    select_all_item.setTitle(ns_string!("Select All"));
-    select_all_item.setAction(Some(sel!(selectAll:)));
-    select_all_item.setTarget(None);
-    select_all_item.setKeyEquivalent(ns_string!("a"));
-    edit_menu.addItem(&select_all_item);
-
-    edit_menu_item.setSubmenu(Some(&edit_menu));
-
     main_menu.addItem(&app_menu_item);
-    main_menu.addItem(&edit_menu_item);
 
     app.setMainMenu(Some(&main_menu));
 }
@@ -678,13 +909,17 @@ unsafe fn build_settings_window(
         | NSWindowStyleMask::Miniaturizable;
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 680.0));
 
-    let window: Retained<NSWindow> = NSWindow::initWithContentRect_styleMask_backing_defer(
-        NSWindow::alloc(mtm),
-        frame,
-        style,
-        NSBackingStoreType::Buffered,
-        false,
-    );
+    let allocated = HushSettingsWindow::alloc(mtm).set_ivars(HushSettingsWindowIvars {
+        controller_ptr: controller as *const AppController as usize,
+    });
+    let window_hw: Retained<HushSettingsWindow> = msg_send![
+        super(allocated),
+        initWithContentRect: frame,
+        styleMask: style,
+        backing: NSBackingStoreType::Buffered,
+        defer: false
+    ];
+    let window: Retained<NSWindow> = window_hw.into_super();
     window.setTitle(ns_string!("hush"));
     window.setReleasedWhenClosed(false);
     window.center();
@@ -1085,7 +1320,7 @@ unsafe fn build_parser_card(
 
     let desc = make_label(
         mtm,
-        ns_string!("Run a final JavaScript transform before paste. Return text or number. Return null/undefined/other values to keep original text."),
+        ns_string!("Run a final JavaScript transform before paste. Your input text is available as `input` (the script must return text or a number). Return null/undefined/other values to keep original text."),
         11.0,
         false,
     );
@@ -1125,40 +1360,44 @@ unsafe fn build_parser_card(
     reset_button.setAction(Some(sel!(resetCustomParser:)));
     controls.addArrangedSubview(&reset_button);
 
-    let scroll = NSScrollView::new(mtm);
-    scroll.setHasVerticalScroller(true);
-    scroll.setHasHorizontalScroller(false);
-    scroll.setDrawsBackground(true);
+    let default_button = NSButton::new(mtm);
+    default_button.setTitle(ns_string!("Default"));
+    default_button.setBezelStyle(NSBezelStyle::Rounded);
+    default_button.setControlSize(NSControlSize::Regular);
+    default_button.setTarget(Some(target_obj));
+    default_button.setAction(Some(sel!(defaultCustomParser:)));
+    controls.addArrangedSubview(&default_button);
 
-    let editor = NSTextView::new(mtm);
-    editor.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-    let ns_text = NSString::from_str("");
-    editor.setString(&ns_text);
+    let parser_config = WKWebViewConfiguration::new(mtm);
+    let content_controller = WKUserContentController::new(mtm);
+    let handler = ParserMessageHandler::new(mtm, controller);
+    let handler_proto = ProtocolObject::from_ref(&*handler);
+    let handler_name = NSString::from_str(PARSER_MESSAGE_HANDLER_NAME);
+    content_controller.addScriptMessageHandler_name(handler_proto, &handler_name);
+    parser_config.setUserContentController(&content_controller);
 
-    scroll.setDocumentView(Some(&editor));
-    scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
-    let editor_height = scroll
+    let editor = WKWebView::initWithFrame_configuration(
+        WKWebView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 132.0)),
+        &parser_config,
+    );
+    editor.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let editor_height = editor
         .heightAnchor()
         .constraintEqualToConstant(132.0);
     editor_height.setActive(true);
-    inner.addArrangedSubview(&scroll);
+    inner.addArrangedSubview(&editor);
 
-    let editor_for_notify = editor.clone();
-    let _ = controller.ivars().parser_editor.set(editor);
+    let html = NSString::from_str(&parser_editor_html());
+    editor.loadHTMLString_baseURL(&html, None);
+
+    let _ = controller.ivars().parser_webview.set(editor.clone());
+    let _ = controller.ivars().parser_message_handler.set(handler);
     let _ = controller.ivars().parser_enabled_checkbox.set(enabled_checkbox);
     let _ = controller.ivars().parser_apply_button.set(apply_button);
     let _ = controller.ivars().parser_reset_button.set(reset_button);
     controller.refresh_parser();
     inner.addArrangedSubview(&controls);
-
-    let name = ns_string!("NSTextDidChangeNotification");
-    let center = NSNotificationCenter::defaultCenter();
-    center.addObserver_selector_name_object(
-        controller,
-        sel!(markCustomParserDirty:),
-        Some(name),
-        Some(&*editor_for_notify),
-    );
 
     box_view.setContentView(Some(&inner));
 
@@ -1172,8 +1411,8 @@ unsafe fn build_parser_card(
         .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
         .setActive(true);
 
-    let scroll_view: &NSView = &scroll;
-    scroll_view
+    let editor_view: &NSView = &editor;
+    editor_view
         .widthAnchor()
         .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
         .setActive(true);

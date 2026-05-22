@@ -78,8 +78,10 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
                 if self.recording {
                     return Ok(());
                 }
+                eprintln!("[hush] pipeline trigger: Start recording");
                 self.sink.publish(StatusEvent::Recording);
                 if let Err(e) = self.capture.start() {
+                    eprintln!("[hush] pipeline: capture start failed: {e}");
                     self.sink.publish(StatusEvent::Error(e.clone()));
                     self.sink.publish(StatusEvent::Idle);
                     return Err(PipelineError::Capture(e));
@@ -91,10 +93,19 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
                 if !self.recording {
                     return Ok(());
                 }
-                let samples = self.capture.stop().map_err(PipelineError::Capture)?;
+                eprintln!("[hush] pipeline trigger: Stop recording");
+                let samples = self.capture.stop().map_err(|e| {
+                    eprintln!("[hush] pipeline: capture stop failed: {e}");
+                    PipelineError::Capture(e)
+                })?;
                 self.recording = false;
                 self.sink.publish(StatusEvent::Stopped);
                 if samples.len() < self.min_samples {
+                    eprintln!(
+                        "[hush] pipeline: audio clip too short ({} samples < {} minimum), discarding",
+                        samples.len(),
+                        self.min_samples
+                    );
                     self.sink.publish(StatusEvent::Idle);
                     return Ok(());
                 }
@@ -109,9 +120,15 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
                 };
                 self.sink.publish(StatusEvent::Idle);
                 if !text.is_empty() {
+                    eprintln!("[hush] pipeline: delivering text: \"{}\"", text);
                     self.output
                         .deliver(&text)
-                        .map_err(PipelineError::Output)?;
+                        .map_err(|e| {
+                            eprintln!("[hush] pipeline: delivery failed: {e}");
+                            PipelineError::Output(e)
+                        })?;
+                } else {
+                    eprintln!("[hush] pipeline: transcription was empty, nothing to deliver");
                 }
                 Ok(())
             }
@@ -119,6 +136,7 @@ impl<C: Capture, T: Transcriber, O: Output, S: StatusSink> Pipeline<C, T, O, S> 
     }
 
     pub fn run(mut self, rx: Receiver<Trigger>) {
+        while rx.try_recv().is_ok() {}
         while let Ok(t) = rx.recv() {
             if let Err(e) = self.handle(t) {
                 eprintln!("[hush] pipeline: {e:?}");

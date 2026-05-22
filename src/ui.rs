@@ -53,6 +53,8 @@ pub struct ControllerIvars {
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
     parakeet_model_popup: OnceCell<Retained<NSPopUpButton>>,
+    parakeet_model_status_label: OnceCell<Retained<NSTextField>>,
+    model_refresh_timer: RefCell<Option<Retained<NSTimer>>>,
     parser_enabled_checkbox: OnceCell<Retained<NSButton>>,
     parser_editor: OnceCell<Retained<NSTextView>>,
     parser_apply_button: OnceCell<Retained<NSButton>>,
@@ -157,13 +159,44 @@ define_class!(
                 _ => return,
             };
             let mut cfg = config::load();
-            if cfg.parakeet_model == model {
+            let is_same = cfg.parakeet_model == model;
+            let is_error = matches!(crate::audio::get_download_status(), crate::audio::DownloadStatus::Error(_));
+
+            if is_same && !is_error {
                 return;
             }
+
             cfg.parakeet_model = model;
             if let Err(e) = config::save(&cfg) {
                 eprintln!("[hush] failed to save model config: {e}");
             }
+
+            crate::audio::set_download_status(crate::audio::DownloadStatus::Idle);
+            self.refresh_parakeet_model();
+
+            if let Some(hub_arc) = self.ivars().trigger_hub.get() {
+                let (new_tx, new_rx) = std::sync::mpsc::channel();
+                if let Some(overlay_mutex) = self.ivars().overlay_state.get() {
+                    let overlay = overlay_mutex.clone();
+                    let dictation = crate::dictation::Dictation::production(&cfg, overlay);
+                    dictation.start_processing(new_rx);
+                    let mut guard = hub_arc.lock().unwrap();
+                    *guard = new_tx;
+                }
+            }
+        }
+
+        #[unsafe(method(modelTimerTick:))]
+        fn model_timer_tick(&self, _timer: Option<&AnyObject>) {
+            if let Some(win) = self.ivars().settings_window.get() {
+                if !win.isVisible() {
+                    if let Some(t) = self.ivars().model_refresh_timer.replace(None) {
+                        t.invalidate();
+                    }
+                    return;
+                }
+            }
+            self.refresh_parakeet_model();
         }
 
         #[unsafe(method(toggleAutostart:))]
@@ -287,6 +320,68 @@ impl AppController {
             ParakeetModel::V11b => 1,
         };
         popup.selectItemAtIndex(index);
+        self.update_model_status(cfg.parakeet_model);
+    }
+
+    fn start_model_refresh_timer(&self) {
+        if self.ivars().model_refresh_timer.borrow().is_some() {
+            return;
+        }
+        let timer = unsafe {
+            let target: &AnyObject = self;
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                1.0,
+                target,
+                sel!(modelTimerTick:),
+                None,
+                true,
+            )
+        };
+        self.ivars().model_refresh_timer.replace(Some(timer));
+    }
+
+    fn stop_model_refresh_timer(&self) {
+        if let Some(t) = self.ivars().model_refresh_timer.replace(None) {
+            t.invalidate();
+        }
+    }
+
+    fn update_model_status(&self, model: ParakeetModel) {
+        let is_cached = crate::audio::is_model_cached(model);
+        if let Some(label) = self.ivars().parakeet_model_status_label.get() {
+            if is_cached {
+                label.setStringValue(ns_string!("✓ Downloaded"));
+                label.setTextColor(Some(&NSColor::systemGreenColor()));
+                self.stop_model_refresh_timer();
+            } else {
+                match crate::audio::get_download_status() {
+                    crate::audio::DownloadStatus::QueryingModelInfo => {
+                        label.setStringValue(ns_string!("Querying model info…"));
+                        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                        self.start_model_refresh_timer();
+                    }
+                    crate::audio::DownloadStatus::Downloading { file, downloaded_bytes, total_bytes } => {
+                        let current_str = format_bytes(downloaded_bytes);
+                        let total_str = format_bytes(total_bytes);
+                        let status_str = format!("Downloading {file} ({current_str}/{total_str})…");
+                        label.setStringValue(&NSString::from_str(&status_str));
+                        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                        self.start_model_refresh_timer();
+                    }
+                    crate::audio::DownloadStatus::Error(err) => {
+                        let status_str = format!("Error: {err}");
+                        label.setStringValue(&NSString::from_str(&status_str));
+                        label.setTextColor(Some(&NSColor::systemRedColor()));
+                        self.stop_model_refresh_timer();
+                    }
+                    crate::audio::DownloadStatus::Idle => {
+                        label.setStringValue(ns_string!("Pending download"));
+                        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                        self.start_model_refresh_timer();
+                    }
+                }
+            }
+        }
     }
 
     fn refresh_parser(&self) {
@@ -725,7 +820,7 @@ unsafe fn build_settings_window(
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable;
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 680.0));
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 560.0));
 
     let window: Retained<NSWindow> = NSWindow::initWithContentRect_styleMask_backing_defer(
         NSWindow::alloc(mtm),
@@ -765,8 +860,12 @@ unsafe fn build_settings_window(
     subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
     stack.addArrangedSubview(&subtitle);
 
-    let shortcut_heading = make_label(mtm, ns_string!("Shortcut"), 14.0, true);
-    stack.addArrangedSubview(&shortcut_heading);
+    let general_heading = make_label(mtm, ns_string!("General"), 14.0, true);
+    stack.addArrangedSubview(&general_heading);
+
+    let autostart_box = build_autostart_card(mtm, controller);
+    let model_box = build_parakeet_model_card(mtm, controller);
+    add_card_row(mtm, &stack, &autostart_box, &model_box);
 
     let shortcut_card = build_shortcut_card(mtm, controller);
     add_card(&stack, &shortcut_card);
@@ -774,7 +873,6 @@ unsafe fn build_settings_window(
     let perms_heading = make_label(mtm, ns_string!("Permissions"), 14.0, true);
     stack.addArrangedSubview(&perms_heading);
 
-    // Microphone — popup-style grant
     let mic_card = build_card(
         mtm,
         ns_string!("Microphone"),
@@ -787,15 +885,10 @@ unsafe fn build_settings_window(
             let _ = controller.ivars().mic_button.set(labels.button.clone());
         },
     );
-    add_card(&stack, &mic_card);
-
-    // Accessibility — System Settings. Gates BOTH the global fn-key
-    // monitor (via NSEvent.addGlobalMonitor) and the Cmd+V paste
-    // (via CGEventPost). Single perm covers both, no Input Monitoring.
     let acc_card = build_card(
         mtm,
         ns_string!("Accessibility"),
-        ns_string!("Lets hush detect your push-to-talk shortcut globally and paste the transcript by sending Cmd+V to the focused app."),
+        ns_string!("Detects your shortcut globally and pastes transcripts via Cmd+V."),
         ns_string!("Open Accessibility…"),
         sel!(grantAccessibility:),
         controller,
@@ -804,17 +897,10 @@ unsafe fn build_settings_window(
             let _ = controller.ivars().accessibility_button.set(labels.button.clone());
         },
     );
-    add_card(&stack, &acc_card);
+    add_card_row(mtm, &stack, &mic_card, &acc_card);
 
-    // Auto-start at login — backed by ~/Library/LaunchAgents/com.djmunro.hush.plist.
-    let autostart_heading = make_label(mtm, ns_string!("General"), 14.0, true);
-    stack.addArrangedSubview(&autostart_heading);
-
-    let autostart_box = build_autostart_card(mtm, controller);
-    add_card(&stack, &autostart_box);
-
-    let model_box = build_parakeet_model_card(mtm, controller);
-    add_card(&stack, &model_box);
+    let parser_heading = make_label(mtm, ns_string!("Custom Parser"), 14.0, true);
+    stack.addArrangedSubview(&parser_heading);
 
     let parser_box = build_parser_card(mtm, controller);
     add_card(&stack, &parser_box);
@@ -1135,18 +1221,30 @@ unsafe fn build_parakeet_model_card(
     let label = make_label(mtm, ns_string!("Parakeet model"), 13.0, true);
     inner.addArrangedSubview(&label);
 
+    let row = NSStackView::new(mtm);
+    row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    row.setSpacing(10.0);
+    row.setAlignment(NSLayoutAttribute::CenterY);
+    row.setDistribution(NSStackViewDistribution::Fill);
+    row.setTranslatesAutoresizingMaskIntoConstraints(false);
+
     let popup = NSPopUpButton::new(mtm);
     popup.addItemWithTitle(ns_string!("0.6B"));
     popup.addItemWithTitle(ns_string!("1.1B"));
     let target_obj: &AnyObject = controller;
     popup.setTarget(Some(target_obj));
     popup.setAction(Some(sel!(changeParakeetModel:)));
-    inner.addArrangedSubview(&popup);
+    row.addArrangedSubview(&popup);
+
+    let status_label = make_label(mtm, ns_string!(""), 12.0, false);
+    row.addArrangedSubview(&status_label);
+
+    inner.addArrangedSubview(&row);
 
     let desc = make_label(
         mtm,
         ns_string!(
-            "0.6B is faster and smaller; 1.1B is more accurate but slower and uses more disk (~4 GB). Quit and reopen hush after changing."
+            "0.6B is faster and smaller; 1.1B is more accurate but slower and uses more disk (~4 GB). Loads automatically when changed."
         ),
         11.0,
         false,
@@ -1169,6 +1267,7 @@ unsafe fn build_parakeet_model_card(
         .setActive(true);
 
     let _ = controller.ivars().parakeet_model_popup.set(popup);
+    let _ = controller.ivars().parakeet_model_status_label.set(status_label);
     controller.refresh_parakeet_model();
 
     box_view
@@ -1315,11 +1414,38 @@ unsafe fn build_parser_card(
 /// intrinsic-sizes its children otherwise).
 unsafe fn add_card(stack: &NSStackView, card: &NSBox) {
     stack.addArrangedSubview(card);
-    let card_view: &NSView = card;
-    let stack_view: &NSView = stack;
-    card_view
-        .widthAnchor()
-        .constraintEqualToAnchor_constant(&stack_view.widthAnchor(), -48.0)
+    pin_row_width(stack, card);
+}
+
+unsafe fn add_card_row(
+    mtm: MainThreadMarker,
+    stack: &NSStackView,
+    left: &NSBox,
+    right: &NSBox,
+) {
+    let row = NSStackView::new(mtm);
+    row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    row.setSpacing(12.0);
+    row.setAlignment(NSLayoutAttribute::Top);
+    row.setDistribution(NSStackViewDistribution::FillEqually);
+    row.setTranslatesAutoresizingMaskIntoConstraints(false);
+    row.addArrangedSubview(left);
+    row.addArrangedSubview(right);
+    stack.addArrangedSubview(&row);
+    pin_row_width(stack, &row);
+
+    left.heightAnchor()
+        .constraintEqualToAnchor(&right.heightAnchor())
+        .setActive(true);
+
+    left.widthAnchor()
+        .constraintEqualToAnchor(&right.widthAnchor())
+        .setActive(true);
+}
+
+unsafe fn pin_row_width(stack: &NSStackView, view: &NSView) {
+    view.widthAnchor()
+        .constraintEqualToAnchor_constant(&stack.widthAnchor(), -48.0)
         .setActive(true);
 }
 
@@ -1358,6 +1484,20 @@ unsafe fn make_label(
     label.setFont(Some(&font));
     label.setSelectable(false);
     label
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+    while size >= 1024.0 && unit_idx < units.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    format!("{:.2} {}", size, units[unit_idx])
 }
 
 pub fn maybe_show_settings_at_launch(controller: &AppController) {

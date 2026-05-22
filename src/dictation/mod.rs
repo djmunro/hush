@@ -38,14 +38,36 @@ impl Dictation {
 
     pub fn start_processing(self, rx: Receiver<Trigger>) {
         let model = self.model;
+        let overlay = self.overlay.clone();
         std::thread::spawn(move || {
-            // Bootstrap (download if missing) and load on the worker thread so
+            let sink = OverlayStatusSink::new(overlay);
+
+            // Bootstrap (download if missing) on the worker thread so
             // first-launch and live-toggle never block main / NSApp.
-            let model_path = audio::ensure_model_for(model);
+            let model_path = match audio::ensure_model_for(model) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("[hush] model bootstrap failed: {e}");
+                    sink.publish(StatusEvent::Error(format!("Model download failed: {e}")));
+                    sink.publish(StatusEvent::Idle);
+                    while rx.recv().is_ok() {}
+                    return;
+                }
+            };
+
             eprintln!("[hush] loading model…");
             let transcriber: Box<dyn Transcriber + Send + Sync> =
-                Box::new(ParakeetTranscriber::new(&model_path).expect("load parakeet model"));
-            let sink = OverlayStatusSink::new(self.overlay);
+                match ParakeetTranscriber::new(&model_path) {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!("[hush] failed to load model: {e}");
+                        sink.publish(StatusEvent::Error(format!("Failed to load model: {e}")));
+                        sink.publish(StatusEvent::Idle);
+                        while rx.recv().is_ok() {}
+                        return;
+                    }
+                };
+
             let level_sink = sink.clone();
             let capture = CpalCapture::new(move |rms| {
                 level_sink.publish(StatusEvent::LevelTick(rms));

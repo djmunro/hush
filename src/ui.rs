@@ -12,7 +12,8 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
     NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
-    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSScrollView, NSStackView,
+    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSPopUpButton, NSScrollView,
+    NSStackView,
     NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField,
     NSTextView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
@@ -24,7 +25,7 @@ use objc2_foundation::{
 };
 
 use crate::autostart;
-use crate::config::{self, Shortcut};
+use crate::config::{self, ParakeetModel, Shortcut};
 use crate::dictation::Trigger;
 use crate::icon;
 use crate::overlay::OverlayState;
@@ -51,6 +52,7 @@ pub struct ControllerIvars {
     accessibility_waiting: Cell<bool>,
     accessibility_wait_timer: RefCell<Option<Retained<NSTimer>>>,
     autostart_checkbox: OnceCell<Retained<NSButton>>,
+    parakeet_model_popup: OnceCell<Retained<NSPopUpButton>>,
     parser_enabled_checkbox: OnceCell<Retained<NSButton>>,
     parser_editor: OnceCell<Retained<NSTextView>>,
     parser_apply_button: OnceCell<Retained<NSButton>>,
@@ -142,6 +144,26 @@ define_class!(
         #[unsafe(method(recordShortcut:))]
         fn record_shortcut(&self, _sender: Option<&AnyObject>) {
             self.start_shortcut_recording();
+        }
+
+        #[unsafe(method(changeParakeetModel:))]
+        fn change_parakeet_model(&self, sender: Option<&AnyObject>) {
+            let Some(popup) = sender.and_then(|s| s.downcast_ref::<NSPopUpButton>()) else {
+                return;
+            };
+            let model = match popup.indexOfSelectedItem() {
+                0 => ParakeetModel::V06b,
+                1 => ParakeetModel::V11b,
+                _ => return,
+            };
+            let mut cfg = config::load();
+            if cfg.parakeet_model == model {
+                return;
+            }
+            cfg.parakeet_model = model;
+            if let Err(e) = config::save(&cfg) {
+                eprintln!("[hush] failed to save model config: {e}");
+            }
         }
 
         #[unsafe(method(toggleAutostart:))]
@@ -240,6 +262,7 @@ impl AppController {
                 win.makeKeyAndOrderFront(None);
             }
             self.refresh_perm_labels();
+            self.refresh_parakeet_model();
         }
     }
 
@@ -252,6 +275,18 @@ impl AppController {
                 NSControlStateValueOff
             });
         }
+    }
+
+    fn refresh_parakeet_model(&self) {
+        let cfg = config::load();
+        let Some(popup) = self.ivars().parakeet_model_popup.get() else {
+            return;
+        };
+        let index = match cfg.parakeet_model {
+            ParakeetModel::V06b => 0,
+            ParakeetModel::V11b => 1,
+        };
+        popup.selectItemAtIndex(index);
     }
 
     fn refresh_parser(&self) {
@@ -575,6 +610,7 @@ pub fn install_menubar_and_window(
     let _ = controller.ivars().overlay_state.set(overlay_state);
     controller.refresh_perm_labels();
     controller.refresh_autostart();
+    controller.refresh_parakeet_model();
     controller.refresh_parser();
     controller.refresh_shortcut_label();
     UiHandles { controller }
@@ -776,6 +812,9 @@ unsafe fn build_settings_window(
 
     let autostart_box = build_autostart_card(mtm, controller);
     add_card(&stack, &autostart_box);
+
+    let model_box = build_parakeet_model_card(mtm, controller);
+    add_card(&stack, &model_box);
 
     let parser_box = build_parser_card(mtm, controller);
     add_card(&stack, &parser_box);
@@ -1063,6 +1102,74 @@ unsafe fn build_autostart_card(
         .setActive(true);
 
     let _ = controller.ivars().autostart_checkbox.set(checkbox);
+
+    box_view
+}
+
+unsafe fn build_parakeet_model_card(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+) -> Retained<NSBox> {
+    let box_view = NSBox::new(mtm);
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setBorderType(objc2_app_kit::NSBorderType::LineBorder);
+    box_view.setBorderColor(&NSColor::separatorColor());
+    box_view.setCornerRadius(10.0);
+    box_view.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+    box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
+    box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let inner = NSStackView::new(mtm);
+    inner.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    inner.setSpacing(6.0);
+    inner.setAlignment(NSLayoutAttribute::Leading);
+    inner.setEdgeInsets(NSEdgeInsets {
+        top: 14.0,
+        left: 16.0,
+        bottom: 14.0,
+        right: 16.0,
+    });
+    inner.setDistribution(NSStackViewDistribution::Fill);
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let label = make_label(mtm, ns_string!("Parakeet model"), 13.0, true);
+    inner.addArrangedSubview(&label);
+
+    let popup = NSPopUpButton::new(mtm);
+    popup.addItemWithTitle(ns_string!("0.6B"));
+    popup.addItemWithTitle(ns_string!("1.1B"));
+    let target_obj: &AnyObject = controller;
+    popup.setTarget(Some(target_obj));
+    popup.setAction(Some(sel!(changeParakeetModel:)));
+    inner.addArrangedSubview(&popup);
+
+    let desc = make_label(
+        mtm,
+        ns_string!(
+            "0.6B is faster and smaller; 1.1B is more accurate but slower and uses more disk (~4 GB). Quit and reopen hush after changing."
+        ),
+        11.0,
+        false,
+    );
+    desc.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    desc.setUsesSingleLineMode(false);
+    desc.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    inner.addArrangedSubview(&desc);
+
+    box_view.setContentView(Some(&inner));
+
+    let inner_view: &NSView = &inner;
+    let box_super: &NSView = &box_view;
+    pin_view_to_parent(inner_view, box_super);
+
+    let desc_view: &NSView = &desc;
+    desc_view
+        .widthAnchor()
+        .constraintEqualToAnchor_constant(&inner_view.widthAnchor(), -32.0)
+        .setActive(true);
+
+    let _ = controller.ivars().parakeet_model_popup.set(popup);
+    controller.refresh_parakeet_model();
 
     box_view
 }

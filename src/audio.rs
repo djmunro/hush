@@ -4,9 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PARAKEET_MODEL_DIR: &str = "parakeet-tdt-0.6b-v3";
-const PARAKEET_URL_PREFIX: &str =
-    "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/";
+use crate::config::ParakeetModel;
+
 const PARAKEET_FILES: &[&str] = &[
     "encoder-model.onnx",
     "encoder-model.onnx.data",
@@ -19,16 +18,13 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// Returns the model directory for Parakeet, downloading missing files first.
-pub fn ensure_model_for() -> PathBuf {
-    ensure_parakeet_model()
-}
-
-fn ensure_parakeet_model() -> PathBuf {
-    let dir = cache_dir().join(PARAKEET_MODEL_DIR);
+pub fn ensure_model_for(model: ParakeetModel) -> PathBuf {
+    let dir = cache_dir().join(model.cache_dir_name());
     std::fs::create_dir_all(&dir).expect("create parakeet model dir");
+    let prefix = model.download_url_prefix();
     for &file in PARAKEET_FILES {
         let path = dir.join(file);
-        let url = format!("{PARAKEET_URL_PREFIX}{file}");
+        let url = format!("{prefix}{file}");
         download_if_missing(&path, &url, file);
     }
     dir
@@ -52,4 +48,24 @@ fn download_if_missing(path: &Path, url: &str, display_name: &str) {
         std::process::exit(1);
     }
     std::fs::rename(&tmp, path).expect("move model file into place");
+}
+
+impl ParakeetModel {
+    fn cache_dir_name(self) -> &'static str {
+        match self {
+            ParakeetModel::V06b => "parakeet-tdt-0.6b-v3",
+            ParakeetModel::V11b => "parakeet-tdt-1.1b",
+        }
+    }
+
+    fn download_url_prefix(self) -> &'static str {
+        match self {
+            ParakeetModel::V06b => {
+                "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/"
+            }
+            ParakeetModel::V11b => {
+                "https://huggingface.co/dtgagnon/parakeet-tdt-1.1b-onnx/resolve/main/"
+            }
+        }
+    }
 }

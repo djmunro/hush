@@ -62,6 +62,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSBox",
     "NSPanel",
     "NSScreen",
+    "NSPopUpButton",
 ] }
 
 [profile.release]

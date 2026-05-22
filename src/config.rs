@@ -1,6 +1,6 @@
 //! User config at ~/.config/hush/config.toml.
 //!
-//! Single field today: the push-to-talk shortcut. Stored as a string like
+//! Shortcut, Parakeet model size, cleanup, and custom parser. Stored as a string like
 //! `"fn"`, `"left_option+space"`, or `"left_cmd+right_cmd"` so it stays
 //! human-editable. Autostart is *not* stored here — it's derived from the
 //! presence of ~/Library/LaunchAgents/com.djmunro.hush.plist, which is the
@@ -153,6 +153,16 @@ pub struct CustomParserConfig {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ParakeetModel {
+    #[default]
+    #[serde(rename = "0.6b")]
+    V06b,
+    #[serde(rename = "1.1b")]
+    V11b,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CleanupConfig {
     #[serde(default)]
     pub capitalize: bool,
@@ -166,6 +176,8 @@ pub struct CleanupConfig {
 struct ConfigFile {
     shortcut: Option<String>,
     #[serde(default)]
+    parakeet_model: Option<ParakeetModel>,
+    #[serde(default)]
     cleanup: Option<CleanupConfig>,
     #[serde(default)]
     custom_parser: Option<CustomParserConfig>,
@@ -174,6 +186,7 @@ struct ConfigFile {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub shortcut: Shortcut,
+    pub parakeet_model: ParakeetModel,
     pub cleanup: CleanupConfig,
     pub custom_parser: CustomParserConfig,
 }
@@ -182,6 +195,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             shortcut: Shortcut::fn_only(),
+            parakeet_model: ParakeetModel::default(),
             cleanup: CleanupConfig::default(),
             custom_parser: CustomParserConfig::default(),
         }
@@ -212,10 +226,12 @@ pub fn load() -> Config {
         .as_deref()
         .and_then(Shortcut::from_token)
         .unwrap_or_else(Shortcut::fn_only);
+    let parakeet_model = parsed.parakeet_model.unwrap_or_default();
     let cleanup = parsed.cleanup.unwrap_or_default();
     let custom_parser = parsed.custom_parser.unwrap_or_default();
     Config {
         shortcut,
+        parakeet_model,
         cleanup,
         custom_parser,
     }
@@ -224,6 +240,7 @@ pub fn load() -> Config {
 pub fn save(cfg: &Config) -> Result<(), String> {
     let dir = config_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    let parakeet_model = (cfg.parakeet_model != ParakeetModel::default()).then_some(cfg.parakeet_model);
     let cleanup = if cfg.cleanup != CleanupConfig::default() {
         Some(cfg.cleanup)
     } else {
@@ -231,6 +248,7 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     };
     let body = ConfigFile {
         shortcut: Some(cfg.shortcut.to_token()),
+        parakeet_model,
         cleanup,
         custom_parser: Some(cfg.custom_parser.clone()),
     };

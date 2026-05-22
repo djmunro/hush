@@ -173,6 +173,7 @@ define_class!(
 
             crate::audio::set_download_status(crate::audio::DownloadStatus::Idle);
             self.refresh_parakeet_model();
+            self.start_model_refresh_timer();
 
             if let Some(hub_arc) = self.ivars().trigger_hub.get() {
                 let (new_tx, new_rx) = std::sync::mpsc::channel();
@@ -349,32 +350,37 @@ impl AppController {
     fn update_model_status(&self, model: ParakeetModel) {
         let is_cached = crate::audio::is_model_cached(model);
         if let Some(label) = self.ivars().parakeet_model_status_label.get() {
-            if is_cached {
-                label.setStringValue(ns_string!("✓ Downloaded"));
-                label.setTextColor(Some(&NSColor::systemGreenColor()));
-                self.stop_model_refresh_timer();
-            } else {
-                match crate::audio::get_download_status() {
-                    crate::audio::DownloadStatus::QueryingModelInfo => {
-                        label.setStringValue(ns_string!("Querying model info…"));
-                        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-                        self.start_model_refresh_timer();
-                    }
-                    crate::audio::DownloadStatus::Downloading { file, downloaded_bytes, total_bytes } => {
-                        let current_str = format_bytes(downloaded_bytes);
-                        let total_str = format_bytes(total_bytes);
-                        let status_str = format!("Downloading {file} ({current_str}/{total_str})…");
-                        label.setStringValue(&NSString::from_str(&status_str));
-                        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-                        self.start_model_refresh_timer();
-                    }
-                    crate::audio::DownloadStatus::Error(err) => {
-                        let status_str = format!("Error: {err}");
-                        label.setStringValue(&NSString::from_str(&status_str));
-                        label.setTextColor(Some(&NSColor::systemRedColor()));
+            match crate::audio::get_download_status() {
+                crate::audio::DownloadStatus::QueryingModelInfo => {
+                    label.setStringValue(ns_string!("Querying model info…"));
+                    label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                    self.start_model_refresh_timer();
+                }
+                crate::audio::DownloadStatus::Downloading { file, downloaded_bytes, total_bytes } => {
+                    let current_str = format_bytes(downloaded_bytes);
+                    let total_str = format_bytes(total_bytes);
+                    let status_str = format!("Downloading {file} ({current_str}/{total_str})…");
+                    label.setStringValue(&NSString::from_str(&status_str));
+                    label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                    self.start_model_refresh_timer();
+                }
+                crate::audio::DownloadStatus::LoadingModel => {
+                    label.setStringValue(ns_string!("Loading model…"));
+                    label.setTextColor(Some(&NSColor::systemOrangeColor()));
+                    self.start_model_refresh_timer();
+                }
+                crate::audio::DownloadStatus::Error(err) => {
+                    let status_str = format!("Error: {err}");
+                    label.setStringValue(&NSString::from_str(&status_str));
+                    label.setTextColor(Some(&NSColor::systemRedColor()));
+                    self.stop_model_refresh_timer();
+                }
+                crate::audio::DownloadStatus::Idle => {
+                    if is_cached {
+                        label.setStringValue(ns_string!("✓ Ready"));
+                        label.setTextColor(Some(&NSColor::systemGreenColor()));
                         self.stop_model_refresh_timer();
-                    }
-                    crate::audio::DownloadStatus::Idle => {
+                    } else {
                         label.setStringValue(ns_string!("Pending download"));
                         label.setTextColor(Some(&NSColor::secondaryLabelColor()));
                         self.start_model_refresh_timer();

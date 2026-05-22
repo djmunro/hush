@@ -56,6 +56,7 @@ impl Dictation {
             };
 
             eprintln!("[hush] loading model…");
+            crate::audio::set_download_status(crate::audio::DownloadStatus::LoadingModel);
             let transcriber: Box<dyn Transcriber + Send + Sync> =
                 match ParakeetTranscriber::new(&model_path) {
                     Ok(t) => Box::new(t),
@@ -63,10 +64,12 @@ impl Dictation {
                         eprintln!("[hush] failed to load model: {e}");
                         sink.publish(StatusEvent::Error(format!("Failed to load model: {e}")));
                         sink.publish(StatusEvent::Idle);
+                        crate::audio::set_download_status(crate::audio::DownloadStatus::Error(format!("Failed to load model: {e}")));
                         while rx.recv().is_ok() {}
                         return;
                     }
                 };
+            crate::audio::set_download_status(crate::audio::DownloadStatus::Idle);
 
             let level_sink = sink.clone();
             let capture = CpalCapture::new(move |rms| {

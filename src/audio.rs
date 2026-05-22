@@ -240,6 +240,7 @@ pub enum DownloadStatus {
         downloaded_bytes: u64,
         total_bytes: u64,
     },
+    LoadingModel,
     Error(String),
 }
 

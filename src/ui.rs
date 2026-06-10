@@ -12,7 +12,8 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBox,
     NSBoxType, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
-    NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem, NSScrollView, NSStackView,
+    NSAutoresizingMaskOptions, NSFont, NSLayoutAttribute, NSLineBreakMode, NSMenu, NSMenuItem,
+    NSScrollView, NSStackView,
     NSStackViewDistribution, NSStatusBar, NSStatusItem, NSTextField,
     NSTextView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
@@ -1150,6 +1151,18 @@ unsafe fn build_parser_card(
 
     let editor = NSTextView::new(mtm);
     editor.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    // A frame-zero NSTextView inside an NSScrollView never grows on its own:
+    // it needs vertical resizability + a width-tracking container, or text
+    // lands in a zero-size container and renders nowhere.
+    editor.setVerticallyResizable(true);
+    editor.setHorizontallyResizable(false);
+    editor.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    editor.setMinSize(NSSize::new(0.0, 0.0));
+    editor.setMaxSize(NSSize::new(f64::MAX, f64::MAX));
+    if let Some(container) = editor.textContainer() {
+        container.setWidthTracksTextView(true);
+        container.setContainerSize(NSSize::new(f64::MAX, f64::MAX));
+    }
     let ns_text = NSString::from_str("");
     editor.setString(&ns_text);
 

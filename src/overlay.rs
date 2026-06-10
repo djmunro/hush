@@ -4,7 +4,7 @@
 //! - Hidden — panel ordered out
 //! - Recording — live audio-level bars driven by a ring buffer of recent
 //!   RMS values that the audio worker writes
-//! - Transcribing — animated dots while whisper does its thing
+//! - Transcribing — animated dots while transcriber does its thing
 //!
 //! Driven by an NSTimer firing at ~30Hz. The timer reads the shared
 //! state and triggers a redraw / show / hide as needed. Audio thread

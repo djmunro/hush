@@ -2,7 +2,6 @@
 
 mod audio;
 mod autostart;
-mod cleanup;
 mod config;
 mod dictation;
 mod icon;
@@ -27,10 +26,8 @@ fn main() {
     let overlay_state = overlay::OverlayState::new();
     let _overlay_ctrl = overlay::OverlayController::install(mtm, overlay_state.clone());
 
-    // Two channels with a relay so the backend can be swapped live: the
-    // shortcut monitor sends into `front_tx`; the relay forwards to whichever
-    // pipeline sender is currently in `hub`. Replacing the hub's inner sender
-    // drops the old one, which signals the previous pipeline thread to exit.
+    // Two channels with a relay so the shortcut monitor and UI can both send
+    // through the active pipeline sender in `hub`.
     let (front_tx, front_rx) = mpsc::channel::<Trigger>();
     let (pipeline_tx, pipeline_rx) = mpsc::channel::<Trigger>();
     Dictation::production(&cfg, overlay_state.clone()).start_processing(pipeline_rx);

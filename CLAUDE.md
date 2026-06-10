@@ -2,7 +2,7 @@
 
 Local push-to-talk dictation for macOS. Hold the configured shortcut
 (default fn) → talk → release → text appears at your cursor. Rust + AppKit
-(objc2) + whisper.cpp (Metal) + cpal.
+(objc2) + parakeet-rs + cpal.
 
 User config lives at `~/.config/hush/config.toml` (single field today:
 `shortcut = "..."`). Autostart state is **derived** from the LaunchAgent
@@ -39,9 +39,8 @@ plist — not stored in config.toml. Don't duplicate.
   `Entitlements.plist` entries; without them, macOS silently denies the
   request *and* doesn't fire a TCC prompt. See `scripts/build-app.sh`.
 - **Use `libc::_exit(0)` to terminate, not `NSApplication::terminate`.**
-  `terminate` calls `libc::exit` which runs C++ atexit destructors, which
-  triggers a `ggml-metal` residency-set assertion crash. See `src/ui.rs`
-  `quit:` selector.
+`terminate` calls `libc::exit` which runs C++ atexit destructors, which can
+race with model teardown and crash during quit. See `src/ui.rs` `quit:` selector.
 - **Use the right TCC API per service:**
   - Microphone → `AVCaptureDevice::requestAccessForMediaType(AVMediaTypeAudio)`
     (in-app popup, no System Settings detour).
@@ -76,7 +75,7 @@ plist — not stored in config.toml. Don't duplicate.
   `config.rs`, `autostart.rs`, `main.rs`.
 - objc2 0.6 conventions: `define_class!`, `MainThreadMarker`,
   `MainThreadOnly` for AppKit types, `AllocAnyThread` for plain `NSObject`.
-- Threading: NSApp main loop only; audio + whisper on a worker thread; the
+- Threading: NSApp main loop only; audio + transcriber on a worker thread; the
   cpal stream is `!Send` so it must live on whatever thread starts it.
 - Shared overlay state via `Arc<Mutex<OverlayState>>` — audio thread mutates,
   UI thread reads under a 30Hz NSTimer.

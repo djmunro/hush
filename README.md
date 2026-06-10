@@ -1,6 +1,6 @@
 # hush
 
-Local push-to-talk dictation for macOS. Hold your shortcut (default **fn**), talk, release — Whisper transcribes and pastes at your cursor. No cloud, no always-on mic.
+Local push-to-talk dictation for macOS. Hold your shortcut (default **fn**), talk, release — Parakeet transcribes and pastes at your cursor. No cloud, no always-on mic.
 
 Lives in your menubar. Floating pill near the bottom-center of the screen shows live audio levels while you speak and a transcribing animation while Whisper runs.
 
@@ -37,7 +37,7 @@ cd hush
 bash scripts/install-dev.sh
 ```
 
-Requires Xcode Command Line Tools (`cmake`, `swift`) and the Rust toolchain. First build is ~3–5 minutes while `whisper.cpp` compiles.
+Requires Xcode Command Line Tools (`cmake`, `swift`) and the Rust toolchain. First build is ~3–5 minutes while model assets download.
 
 ## Update
 
@@ -98,9 +98,51 @@ Settings → **Push-to-talk** card → **Record…**, then press the keys you wa
 
 Stored at `~/.config/hush/config.toml` (`shortcut = "..."`, e.g. `"fn"`, `"left_cmd+space"`, `"left_option+right_option"`). Hand-editable.
 
+### Text parser (JavaScript)
+
+Settings → **Custom parser** lets you run one post-process script before paste.
+
+When enabled, the script is called like:
+
+```js
+(function(input) {
+  // return a string or number to replace the transcript
+  return input
+})
+```
+
+What you can paste into the text box:
+
+```js
+// Trim whitespace and remove only terminal punctuation if present.
+return input
+  .trim()
+  .replace(/[.?!]$/, "");
+```
+
+Hush normalizes smart quotes pasted from rich text into valid JS quotes before execution.
+
+If the script returns a non-string/number, throws, or times out, hush falls back to the original transcript.
+
+`HUSH_PARSER_TIMEOUT_MS` controls the JS execution timeout in milliseconds. Defaults to `5000`.
+
+Set `HUSH_DEBUG=1` to print parser input/output/rejection logs to stdout.
+
+To see those logs on macOS:
+
+- Launch from a terminal so stderr/stdout is visible:
+
+```bash
+HUSH_DEBUG=1 /Applications/Hush.app/Contents/MacOS/Hush
+```
+
+- Or capture macOS app logs in Console.app by filtering for `Hush`.
+  - Open **Console.app** → **Action** → enable **Include Debug Messages**.
+  - Search for `Hush` and expand the recent process entries.
+
 ### Models
 
-`WHISPER_MODEL=base.en open /Applications/Hush.app` to swap models (`tiny.en` / `base.en` / `small.en` / `medium.en`). Default `small.en`. Models cache in `~/.cache/hush/models`.
+Parakeet ONNX model files are cached in `~/.cache/hush/models`.
 
 Auto-start at login: there's a checkbox in the Settings window. (Or use System Settings → General → Login Items → +.)
 
@@ -115,7 +157,7 @@ Auto-start at login: there's a checkbox in the Settings window. (Or use System S
 
 ## Stack
 
-[whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [whisper-rs](https://github.com/tazz4843/whisper-rs) (Metal on Apple Silicon) · [cpal](https://github.com/RustAudio/cpal) for mic · AppKit via [objc2](https://github.com/madsmtm/objc2) · `NSEvent.addGlobalMonitor` for the fn key · `CGEventPost` for paste.
+[parakeet-rs](https://github.com/icefirsit/parakeet-rs) · [cpal](https://github.com/RustAudio/cpal) for mic · AppKit via [objc2](https://github.com/madsmtm/objc2) · `NSEvent.addGlobalMonitor` for the fn key · `CGEventPost` for paste.
 
 ## Dev workflow
 
@@ -135,7 +177,7 @@ bash scripts/package.sh    # → dist/Hush-x.y.z.{dmg,zip}
 
 Cutting a release: see [`.claude/skills/cut-release/SKILL.md`](.claude/skills/cut-release/SKILL.md) and [`docs/release.md`](docs/release.md).
 
-[whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [whisper-rs](https://github.com/tazz4843/whisper-rs) (Metal on Apple Silicon) · [cpal](https://github.com/RustAudio/cpal) for mic · AppKit via [objc2](https://github.com/madsmtm/objc2) · `NSEvent.addGlobalMonitor` + `addLocalMonitor` for the shortcut · `CGEventPost` for paste.
+[parakeet-rs](https://github.com/icefirsit/parakeet-rs) · [cpal](https://github.com/RustAudio/cpal) for mic · AppKit via [objc2](https://github.com/madsmtm/objc2) · `NSEvent.addGlobalMonitor` + `addLocalMonitor` for the shortcut · `CGEventPost` for paste.
 
 ## Uninstall
 

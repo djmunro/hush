@@ -48,7 +48,7 @@ impl Dictation {
             let capture = CpalCapture::new(move |rms| {
                 level_sink.publish(StatusEvent::LevelTick(rms));
             });
-            let output = ClipboardPasteOutput;
+            let output = ClipboardPasteOutput::default();
             let pipeline = Pipeline::new(capture, transcriber, output, sink, MIN_SAMPLES);
             eprintln!("[hush] ready. hold fn to dictate.");
             pipeline.run(rx);

@@ -35,10 +35,7 @@ const VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_HASH: &str = env!("HUSH_GIT_HASH");
-const PARSER_DEFAULT_SCRIPT: &str = r#"const s = input.trim().replace(/[.?]+$/, "");
-if (!s) return s;
-if (s.startsWith("I ")) return s;
-return `${s[0].toLowerCase()}${s.slice(1)}`;"#;
+const PARSER_DEFAULT_SCRIPT: &str = crate::dictation::custom_parser::DEFAULT_SCRIPT;
 
 #[derive(Default)]
 pub struct ControllerIvars {

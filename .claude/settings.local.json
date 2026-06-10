@@ -9,7 +9,14 @@
       "Bash(cargo clippy *)",
       "Bash(git commit *)",
       "Bash(git tag *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git rebase *)",
+      "Bash(git stash *)",
+      "Bash(git rm *)",
+      "Bash(git add *)",
+      "Bash(gh auth *)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(git checkout *)"
     ]
   }
 }

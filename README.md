@@ -12,10 +12,10 @@ Two macOS permissions: **Microphone** and **Accessibility**. No Input Monitoring
 
 ```bash
 brew tap djmunro/hush https://github.com/djmunro/hush.git
-brew install --cask hush
+brew install --cask hush-dictation
 ```
 
-The first command points Brew at this repo as a tap (we don't have a separate `homebrew-hush` repo — the cask lives at `Casks/hush.rb` here). You only run it once per machine. After that, `brew install`, `brew upgrade`, and `brew uninstall` all work normally. Open Hush from Launchpad or `/Applications` — the Settings window auto-opens the first time and walks you through the two permissions.
+The first command points Brew at this repo as a tap (we don't have a separate `homebrew-hush` repo — the cask lives at `Casks/hush-dictation.rb` here). You only run it once per machine. After that, `brew install`, `brew upgrade`, and `brew uninstall` all work normally. (The cask is named `hush-dictation` rather than `hush` because homebrew-cask already ships an unrelated app called Hush — a Safari extension — and the bare name resolves to that one.) Open Hush from Launchpad or `/Applications` — the Settings window auto-opens the first time and walks you through the two permissions.
 
 ### Direct download
 

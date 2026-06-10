@@ -1,9 +1,9 @@
 name: build
 
+# PR gate only — pushes to main are handled by release.yml, which runs
+# the same clippy + package steps before publishing.
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
   check:

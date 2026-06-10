@@ -1,150 +1,76 @@
 ---
 name: cut-release
-description: Cut a new public release of hush — bump version, tag, push. CI builds, publishes to GitHub Releases, and bumps the Homebrew cask automatically.
+description: Explain or troubleshoot hush's automatic release pipeline. Releases happen automatically on every merge to main — there is normally nothing to do by hand.
 ---
 
-# Cutting a hush release
+# hush releases are automatic
 
-## When to invoke
+## The model
 
-- "cut a release" / "ship vX" / "release X.Y.Z"
-- Any request to publish a new version of hush
+Every push to `main` (i.e. every merged PR) triggers
+`.github/workflows/release.yml`, which with no human involvement:
 
-## The happy path (3 commands)
+1. Auto-bumps the patch version in `Cargo.toml` (0.4.2 → 0.4.3)
+2. Gates on `cargo clippy --release --all-targets -- -D warnings`
+3. Builds + packages `Hush-X.Y.Z.{dmg,zip}` via `scripts/package.sh`
+4. Seds the new version + DMG sha256 into `Casks/hush-dictation.rb`
+5. Commits `release vX.Y.Z` (Cargo.toml + Cargo.lock + cask), tags it,
+   pushes to main
+6. Publishes a GitHub Release with auto-generated notes + artifacts
+
+Docs-only pushes (`**.md`, `docs/**`) don't release.
+
+**So if the user asks to "cut a release": merge the work to main.
+That IS the release.** Don't tag, don't bump, don't push tags.
+
+## Minor/major bumps
+
+The patch auto-bump only fires when Cargo.toml's version is already
+tagged. To ship 0.5.0 instead of 0.4.3: set `version = "0.5.0"` in
+`Cargo.toml` inside the PR. The workflow sees the untagged version and
+uses it verbatim.
+
+## Verifying a release went out
 
 ```bash
-# 1. Bump version (pick X.Y.Z based on what changed since last release)
-sed -i '' 's/^version = "[^"]*"/version = "X.Y.Z"/' Cargo.toml
-
-# 2. Verify clippy is clean (CI will gate on this anyway)
-cargo clippy --release --all-targets -- -D warnings
-
-# 3. Commit, tag, push
-git commit -am "release vX.Y.Z"
-git tag vX.Y.Z
-git push && git push --tags
+gh run list --repo djmunro/hush --workflow release --limit 1   # success?
+gh release view --repo djmunro/hush                            # latest release
+git pull                                                       # pull CI's release commit
+brew update && brew info --cask hush-dictation                 # cask updated?
 ```
-
-That's it. CI does the rest:
-- Builds Hush.app on `macos-14` (Apple Silicon)
-- Packages `Hush-X.Y.Z.{dmg,zip}`
-- Creates a GitHub Release with auto-generated notes from commit history
-- Bumps `Casks/hush.rb` in this same repo (commits directly to main)
-
-Wait ~5–10 min, then verify:
-
-```bash
-gh release view vX.Y.Z              # artifacts attached?
-git pull                            # pull the cask-bump commit CI made
-brew update
-brew info --cask hush               # version updated?
-```
-
-## Picking X.Y.Z
-
-We're pre-1.0, so semver is loose. Rough guide:
-- `0.x.0` for new features or notable behavior changes
-- `0.x.y` for bugfixes, small tweaks, dependency bumps
-
-Don't sweat it. Bump whatever feels right based on `git log v(prev)..HEAD`.
 
 ## When something breaks
 
-### CI fails: "Tag vX.Y.Z does not match Cargo.toml A.B.C"
+### Workflow failed on clippy
 
-You forgot to bump Cargo.toml, OR you tagged the wrong commit.
+Fix the lint in a follow-up PR. Merging the fix releases both changes.
 
-Fix: bump Cargo.toml in a new commit, delete the bad tag, re-tag, re-push:
-```bash
-git tag -d vX.Y.Z
-git push origin :refs/tags/vX.Y.Z
-# fix Cargo.toml, commit
-git tag vX.Y.Z
-git push --tags
-```
+### Workflow failed pushing the release commit
 
-### CI fails: clippy warning
+Most likely cause: repo Settings → Actions → General → Workflow
+permissions is not "Read and write permissions".
 
-Don't `--no-verify` past it. Fix the lint, push to main, re-tag.
+### Release published but brew installs the old version
 
-### CI fails: cask bump step
+`brew update` first — brew caches tap state.
 
-Most likely cause: workflow doesn't have write permissions to the repo.
-Fix in repo Settings → Actions → General → Workflow permissions = "Read
-and write permissions".
+### Local checkout fights CI's release commits
 
-To recover, manually bump the cask:
-```bash
-git pull
-SHA=$(gh release download vX.Y.Z -p "*.dmg" -O - | shasum -a 256 | awk '{print $1}')
-sed -i '' "s|version \".*\"|version \"X.Y.Z\"|" Casks/hush.rb
-sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Casks/hush.rb
-git commit -am "Bump cask to X.Y.Z" && git push
-```
-
-### Release published but `brew install --cask hush` still installs old version
-
-Tell the user to `brew update` first. Brew caches tap state; `brew update`
-pulls the latest `Casks/hush.rb`.
-
-## Manual fallback (CI completely broken)
-
-See `docs/release.md` § "Manual fallback" — five-step recipe to ship by hand.
+CI commits to main after every merge. Always `git pull --rebase` before
+pushing local work to main.
 
 ## What you must NOT do
 
-- Don't release without bumping Cargo.toml. Tag/Cargo drift will fail CI.
-- Don't hand-edit `Casks/hush.rb` unless the CI bump step is broken. CI
-  overwrites version + sha256 on every release.
-- Don't enable hardened runtime in `scripts/build-app.sh` to "make it more
-  secure" — see CLAUDE.md and `docs/macos-permissions.md`. We sign ad-hoc
-  on purpose. Brew strips quarantine for users; direct-download users get
-  one Gatekeeper warning, documented in README.
-- Don't add a `release-please.yml` workflow without the user asking. We
-  picked manual-bump-and-tag for simplicity. Conventional commits are
-  not required; CHANGELOG is auto-generated by `gh release create
-  --generate-notes` from commit messages.
+- Don't tag by hand. The workflow creates tags; a hand-pushed tag does
+  nothing (no workflow listens on tags anymore) and will desync the
+  auto-bump arithmetic if it's ahead of main.
+- Don't hand-edit version/sha256 in `Casks/hush-dictation.rb` unless CI
+  is broken — CI overwrites both on every release.
+- Don't rename the cask back to `hush` — homebrew-cask ships an
+  unrelated "Hush" Safari extension that shadows the bare name.
+- Don't enable hardened runtime in `scripts/build-app.sh` — we sign
+  ad-hoc on purpose. See `docs/macos-permissions.md`.
 
-## Testing the pipeline before a real release
+## Manual fallback (CI completely broken)
 
-Push a prerelease tag (anything matching `vX.Y.Z-<suffix>`):
-
-```bash
-git tag v0.2.0-test1
-git push --tags
-```
-
-The workflow:
-- Validates tag matches Cargo.toml (suffix is stripped for comparison)
-- Builds + packages
-- Creates a GitHub Release marked as **Prerelease** with the artifacts
-- **Skips** the cask bump (we don't want test tags poisoning the cask)
-
-After confirming everything works, clean up:
-
-```bash
-gh release delete v0.2.0-test1 --cleanup-tag --yes
-```
-
-Then push the real tag (`v0.2.0`) for the actual release.
-
-## Future upgrade: release-please
-
-If releases get frequent enough that hand-bumping Cargo.toml feels tedious,
-add `.github/workflows/release-please.yml`:
-
-```yaml
-on: { push: { branches: [main] } }
-permissions: { contents: write, pull-requests: write }
-jobs:
-  release-please:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: googleapis/release-please-action@v4
-        with:
-          release-type: rust
-```
-
-Then write commits with conventional prefixes (`feat:`, `fix:`, etc.)
-and merging the auto-generated "release X.Y.Z" PR creates the tag,
-which fires the existing `release.yml`. Out of scope for now.
+See `docs/release.md` § "Manual fallback" — recipe to ship by hand.

@@ -22,10 +22,13 @@ plist — not stored in config.toml. Don't duplicate.
   `dist/`.
 - `cargo bundle` is *not* in the toolchain. We use `scripts/build-app.sh`
   (manual bash) — shorter than configuring a third-party tool.
-- **Cutting a release**: see `.claude/skills/cut-release/SKILL.md`. TL;DR:
-  bump `Cargo.toml` version, `git tag vX.Y.Z`, push tag, CI does the rest
-  (build, package, GitHub Release, Homebrew cask bump). Long-form pipeline
-  in `docs/release.md`.
+- **Releases are fully automatic**: every push to main (merged PR)
+  triggers `.github/workflows/release.yml`, which auto-bumps the patch
+  version, builds, tags, publishes a GitHub Release, and bumps the
+  Homebrew cask. Never tag or bump versions by hand. For a minor/major
+  bump, set the new version in `Cargo.toml` inside the PR — the workflow
+  honors an untagged Cargo.toml version as-is. Long-form pipeline in
+  `docs/release.md`.
 
 ## Platform invariants — read before changing
 
@@ -97,11 +100,12 @@ race with model teardown and crash during quit. See `src/ui.rs` `quit:` selector
   menubar; users start it manually if they don't want autostart.
   Long-term, autostart should migrate to `SMAppService` (macOS 13+).
 - Don't reintroduce `install.sh` / `uninstall.sh`. Distribution lives in
-  the Homebrew cask at `Casks/hush.rb` in this repo (this repo IS the
-  tap, via `brew tap djmunro/hush https://github.com/djmunro/hush.git`).
-  Users run `brew install --cask hush` and `brew uninstall --cask --zap hush`.
-  The cask's `uninstall` block handles the LaunchAgent + process kill +
-  plist removal. See `docs/release.md`.
+  the Homebrew cask at `Casks/hush-dictation.rb` in this repo (this repo
+  IS the tap, via `brew tap djmunro/hush https://github.com/djmunro/hush.git`).
+  Users run `brew install --cask hush-dictation` and
+  `brew uninstall --cask --zap hush-dictation`. The cask is named
+  `hush-dictation`, NOT `hush` — homebrew-cask ships an unrelated "Hush"
+  Safari extension that shadows the bare name. See `docs/release.md`.
 - Don't reintroduce a `~/.local/bin/hush` symlink — the bare binary at a
   separate path creates a separate TCC identity, which is the bug we spent
   most of this project debugging.

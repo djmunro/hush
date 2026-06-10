@@ -1,40 +1,60 @@
 name: release
 
+# Fully automatic: every push to main (i.e. every merged PR) cuts a
+# release. The workflow bumps the patch version, builds, publishes a
+# GitHub Release, and updates the Homebrew cask — no human in the loop.
+#
+# To ship a minor/major bump instead, set the new version in Cargo.toml
+# in the PR itself; the workflow honors an untagged Cargo.toml version
+# as-is and only auto-bumps when Cargo.toml matches an existing tag.
+#
+# No self-trigger loop: the version-bump commit below is pushed with
+# the ambient GITHUB_TOKEN, and GITHUB_TOKEN pushes never trigger
+# workflows.
+
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build:
+  release:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
+          # Check out the branch tip, not the triggering SHA — a queued
+          # run must build on top of the previous run's release commit.
+          ref: main
           fetch-depth: 0
 
-      - name: Verify tag matches Cargo.toml version
+      - name: Compute version
         run: |
           CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          TAG_VER="${GITHUB_REF_NAME#v}"
-          # Strip any prerelease suffix for the comparison so test tags
-          # like v0.2.0-test1 or v0.2.0-rc1 are accepted against
-          # Cargo.toml = 0.2.0. Prereleases skip the cask bump below.
-          TAG_BASE="${TAG_VER%%-*}"
-          if [ "$CARGO_VER" != "$TAG_BASE" ]; then
-            echo "::error::Tag base $TAG_BASE (from $GITHUB_REF_NAME) does not match Cargo.toml $CARGO_VER"
-            exit 1
-          fi
-          echo "VERSION=$CARGO_VER" >> "$GITHUB_ENV"
-          if [ "$TAG_BASE" != "$TAG_VER" ]; then
-            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
+          if git rev-parse -q --verify "refs/tags/v${CARGO_VER}" >/dev/null; then
+            LAST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+            BASE=${LAST#v}
+            VERSION="${BASE%.*}.$(( ${BASE##*.} + 1 ))"
+            sed -i '' "s/^version = \"${CARGO_VER}\"/version = \"${VERSION}\"/" Cargo.toml
+            echo "Auto-bumped ${CARGO_VER} -> ${VERSION}"
           else
-            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+            VERSION="$CARGO_VER"
+            echo "Using manually-set Cargo.toml version ${VERSION}"
           fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -44,41 +64,32 @@ jobs:
       - name: Build + package
         run: bash scripts/package.sh
 
-      - name: Upload artifacts to release
+      - name: Update Homebrew cask
+        run: |
+          SHA=$(shasum -a 256 "dist/Hush-${VERSION}.dmg" | awk '{print $1}')
+          sed -i '' -E "s|^  version \".*\"|  version \"${VERSION}\"|" Casks/hush-dictation.rb
+          sed -i '' -E "s|^  sha256 .*|  sha256 \"${SHA}\"|" Casks/hush-dictation.rb
+
+      - name: Commit release and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock Casks/hush-dictation.rb
+          git commit -m "release v${VERSION}"
+          # A human merge may have landed while we built; rebase our
+          # one metadata commit on top rather than failing the release.
+          # Tag only after the rebase so the tag points at the commit
+          # that actually lands on main.
+          git pull --rebase origin main
+          git tag "v${VERSION}"
+          git push origin main "v${VERSION}"
+
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PRERELEASE_FLAG=""
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
             --generate-notes \
-            $PRERELEASE_FLAG \
             "dist/Hush-${VERSION}.dmg" \
-            "dist/Hush-${VERSION}.zip" \
-            || gh release upload "$GITHUB_REF_NAME" \
-              "dist/Hush-${VERSION}.dmg" \
-              "dist/Hush-${VERSION}.zip" \
-              --clobber
-
-      - name: Bump Homebrew cask
-        if: env.IS_PRERELEASE == 'false'
-        run: |
-          SHA=$(shasum -a 256 "dist/Hush-${VERSION}.dmg" | awk '{print $1}')
-          # The release tag points at a commit before the cask bump. We
-          # commit directly to main, since the cask file lives in this
-          # same repo (custom-URL tap; see README install instructions).
-          git fetch origin main
-          git checkout main
-          sed -i '' "s|version \".*\"|version \"${VERSION}\"|" Casks/hush.rb
-          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Casks/hush.rb
-          if git diff --quiet; then
-            echo "Cask already up to date."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Bump cask to ${VERSION}"
-          git push origin main
+            "dist/Hush-${VERSION}.zip"

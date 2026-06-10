@@ -13,7 +13,10 @@
       "Bash(git rebase *)",
       "Bash(git stash *)",
       "Bash(git rm *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(gh auth *)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(git checkout *)"
     ]
   }
 }

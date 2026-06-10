@@ -19,6 +19,7 @@ BUILD_PROFILE="${BUILD_PROFILE:-release}"
 BUNDLE_ID="com.djmunro.hush"
 APP_NAME="Hush"
 DISPLAY_NAME="hush"
+VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 
 if [[ "$BUILD_PROFILE" == "release" ]]; then
     cargo build --release
@@ -96,9 +97,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>

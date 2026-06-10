@@ -13,10 +13,10 @@ cask "hush" do
   app "Hush.app"
 
   uninstall launchctl: "com.djmunro.hush",
-            quit:      "com.djmunro.hush",
-            delete:    "~/Library/LaunchAgents/com.djmunro.hush.plist"
+            quit:      "com.djmunro.hush"
 
   zap trash: [
+    "~/Library/LaunchAgents/com.djmunro.hush.plist",
     "~/Library/Saved Application State/com.djmunro.hush.savedState",
     "~/Library/Preferences/com.djmunro.hush.plist",
     "~/.cache/hush",

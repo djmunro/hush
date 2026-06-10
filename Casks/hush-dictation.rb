@@ -1,6 +1,6 @@
 cask "hush-dictation" do
-  version "0.4.5"
-  sha256 "8531bd36f01cdef66b512c01cef522ea49db357a11080b07e62a75a9cfbe1e69"
+  version "0.4.6"
+  sha256 "eeee1cff134412448d7e8a7076feb6606a50e11e493b80e57bd93ce1bb7a0010"
 
   url "https://github.com/djmunro/hush/releases/download/v#{version}/Hush-#{version}.dmg"
   name "Hush"

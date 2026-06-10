@@ -77,9 +77,11 @@ notarization. Tradeoffs:
 
 - **Direct .dmg download**: macOS shows a Gatekeeper warning on first
   launch. Users right-click → Open, or `xattr -d com.apple.quarantine`.
-- **Homebrew install**: clean. Brew strips the `com.apple.quarantine`
-  extended attribute as part of cask install, so Gatekeeper doesn't fire.
-  This is *the* reason we recommend brew as the primary install path.
+- **Homebrew install**: clean. Brew quarantines cask downloads by
+  default, so the cask carries a `postflight` that strips
+  `com.apple.quarantine` from the installed app — without it, macOS
+  blocks launch with "couldn't verify the source". This is *the* reason
+  we recommend brew as the primary install path.
 
 To upgrade to a properly-notarized release later: enroll in the Apple
 Developer Program ($99/yr), add `DEVELOPER_ID_CERT` (base64-encoded p12)

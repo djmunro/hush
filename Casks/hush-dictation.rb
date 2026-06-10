@@ -12,6 +12,14 @@ cask "hush-dictation" do
 
   app "Hush.app"
 
+  # The app is ad-hoc signed (no Developer ID), so Gatekeeper blocks it
+  # with "couldn't verify the source" if the quarantine flag survives.
+  # We own this tap, so the cask strips it itself.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine", "#{appdir}/Hush.app"]
+  end
+
   uninstall launchctl: "com.djmunro.hush",
             quit:      "com.djmunro.hush"
 
@@ -24,7 +32,8 @@ cask "hush-dictation" do
 
   caveats <<~EOS
     Hush needs Microphone and Accessibility permissions. Grant them when
-    prompted on first launch.
+    prompted on first launch. The quarantine flag is removed on install
+    (the app is ad-hoc signed), so no Gatekeeper dialog should appear.
 
     Homebrew can't remove macOS TCC permissions on uninstall. To fully reset:
       tccutil reset Microphone com.djmunro.hush
